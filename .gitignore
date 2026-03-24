@@ -4,7 +4,14 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.worktrees/
+.nexus/
 node_modules/
 .next/
 dist/
 build/
+.worktrees/
+.coord/
