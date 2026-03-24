@@ -10,6 +10,7 @@ from .models import (
     ActionDescriptor,
     CreateExecutionRequest,
     CreateRunRequest,
+    DispatchRecord,
     ExecutionRecord,
     NextActionRecord,
     RecoveryActionRequest,
@@ -22,6 +23,7 @@ from .models import (
 from .service import (
     AGENT_ROLES,
     advance_run,
+    create_dispatch,
     create_execution,
     create_run,
     get_execution,
@@ -29,6 +31,7 @@ from .service import (
     get_run,
     get_system_summary,
     list_action_descriptors,
+    list_dispatches,
     list_executions,
     list_runs,
     recommend_next_action,
@@ -101,6 +104,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return get_recovery_snapshot(app_settings, run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Run not found") from error
+
+    @app.get("/api/runs/{run_id}/dispatches", response_model=list[DispatchRecord])
+    def dispatches_endpoint(run_id: str) -> list[DispatchRecord]:
+        try:
+            return list_dispatches(app_settings, run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run not found") from error
+
+    @app.post("/api/runs/{run_id}/dispatches", response_model=DispatchRecord, status_code=201)
+    def create_dispatch_endpoint(run_id: str) -> DispatchRecord:
+        try:
+            return create_dispatch(app_settings, run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.post("/api/runs/{run_id}/recover", response_model=RecoveryActionResult)
     def recover_endpoint(run_id: str, request: RecoveryActionRequest) -> RecoveryActionResult:

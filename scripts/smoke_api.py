@@ -33,7 +33,7 @@ def main() -> int:
         assert status == 200 and health["status"] == "ok"
 
         status, agents = request_json(f"{args.base_url}/api/agents")
-        assert status == 200 and len(agents["items"]) >= 5
+        assert status == 200 and len(agents["items"]) >= 4
 
         status, run = request_json(
             f"{args.base_url}/api/requests",
@@ -41,10 +41,18 @@ def main() -> int:
         )
         assert status == 201
 
+        status, dispatch = request_json(f"{args.base_url}/api/runs/{run['id']}/dispatches", {})
+        assert status == 201
+        assert dispatch["task_kind"] == "intake"
+        assert dispatch["agent_role"] == "planner"
+        assert len(dispatch["base_commit"]) == 40
+
         status, recovery = request_json(f"{args.base_url}/api/runs/{run['id']}/recovery")
         assert status == 200
         assert recovery["run_status"] == "ready"
         assert recovery["can_advance"] is True
+        assert recovery["latest_dispatch"]["id"] == dispatch["id"]
+        assert recovery["latest_dispatch"]["status"] == "prepared"
 
         status, next_action = request_json(f"{args.base_url}/api/runs/{run['id']}/next-action")
         assert status == 200
@@ -65,6 +73,7 @@ def main() -> int:
         assert status == 200
         assert refreshed_recovery["recovery_status"] == "ready"
         assert refreshed_recovery["next_action"]["action"] == "read-intent"
+        assert refreshed_recovery["latest_dispatch"]["status"] == "invalidated"
 
         for _ in range(4):
             status, execution = request_json(f"{args.base_url}/api/runs/{run['id']}/advance", {})

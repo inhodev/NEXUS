@@ -14,6 +14,7 @@ from .models import (
     ActionDescriptor,
     CreateExecutionRequest,
     CreateRunRequest,
+    DispatchRecord,
     EventRecord,
     ExecutionRecord,
     NextActionRecord,
@@ -42,7 +43,6 @@ AGENT_ROLES = [
     {"role": "planner", "focus": "turn natural language intent into an execution path"},
     {"role": "architect", "focus": "shape boundaries, interfaces, and constraints"},
     {"role": "implementer", "focus": "build the next narrow runnable slice"},
-    {"role": "tester", "focus": "validate behavior and surface uncertainty"},
     {"role": "reviewer", "focus": "check quality, safety, and recoverability"},
 ]
 
@@ -79,6 +79,15 @@ DEFAULT_ACTION_BY_TASK_KIND: dict[str, str] = {
 
 RECOVERY_ARTIFACT_NAME = "run-recovery.json"
 RECOVERY_ACTIONS_ARTIFACT_NAME = "recovery-actions.jsonl"
+DISPATCHES_ARTIFACT_NAME = "dispatches.jsonl"
+
+DEFAULT_AGENT_ROLE_BY_TASK_KIND: dict[str, str] = {
+    "intake": "planner",
+    "planning": "planner",
+    "architecture": "architect",
+    "implementation": "implementer",
+    "verification": "reviewer",
+}
 
 
 def utc_now() -> str:
@@ -231,6 +240,131 @@ def get_recovery_snapshot(settings: Settings, run_id: str) -> RecoverySnapshot:
         return _build_recovery_snapshot(connection, run_row)
 
 
+def create_dispatch(settings: Settings, run_id: str) -> DispatchRecord:
+    created_at = utc_now()
+    base_commit = _resolve_repo_head(settings)
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        recommendation, _ = _resolve_next_action(connection, run_row)
+        if recommendation is None:
+            raise ValueError("No safe dispatch target")
+
+        workspace = Path(run_row["workspace_path"])
+        existing_dispatch, superseded_count = _reconcile_prepared_dispatches(
+            connection,
+            workspace,
+            run_id,
+            task_id=recommendation.task_id,
+            base_commit=base_commit,
+            updated_at=created_at,
+        )
+        if existing_dispatch is not None:
+            if superseded_count:
+                _log_event(
+                    connection,
+                    run_id,
+                    "decision",
+                    (
+                        f"Superseded {superseded_count} stale prepared dispatch record(s) "
+                        f"before reusing dispatch '{existing_dispatch.id}'."
+                    ),
+                    created_at,
+                )
+                _write_recovery_snapshot(
+                    workspace,
+                    _build_recovery_snapshot(connection, _fetch_run_row(connection, run_id)),
+                )
+            return existing_dispatch
+
+        dispatch = _build_dispatch_record(
+            settings,
+            run_row,
+            recommendation,
+            base_commit=base_commit,
+            created_at=created_at,
+        )
+        connection.execute(
+            """
+            INSERT INTO dispatches (
+                id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
+                worktree_name, worktree_path, repo_root, base_commit, prompt_path,
+                startup_commands_json, status, status_detail, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                dispatch.id,
+                dispatch.run_id,
+                dispatch.task_id,
+                dispatch.task_kind,
+                dispatch.task_title,
+                dispatch.agent_role,
+                dispatch.branch_name,
+                dispatch.worktree_name,
+                dispatch.worktree_path,
+                dispatch.repo_root,
+                dispatch.base_commit,
+                dispatch.prompt_path,
+                json.dumps(dispatch.startup_commands),
+                dispatch.status,
+                dispatch.status_detail,
+                dispatch.created_at,
+                dispatch.updated_at,
+            ),
+        )
+        _write_dispatch_prompt(
+            workspace,
+            dispatch,
+            intent=str(run_row["intent"]),
+            recommendation=recommendation,
+        )
+        _append_dispatch_record(workspace, dispatch)
+        if superseded_count:
+            _log_event(
+                connection,
+                run_id,
+                "decision",
+                (
+                    f"Superseded {superseded_count} stale prepared dispatch record(s) "
+                    "before preparing a new pinned dispatch."
+                ),
+                created_at,
+            )
+        _log_event(
+            connection,
+            run_id,
+            "decision",
+            (
+                f"Prepared dispatch '{dispatch.id}' for task '{dispatch.task_title}' "
+                f"with agent role '{dispatch.agent_role}'."
+            ),
+            created_at,
+        )
+        _write_recovery_snapshot(
+            workspace,
+            _build_recovery_snapshot(connection, _fetch_run_row(connection, run_id)),
+        )
+
+    return dispatch
+
+
+def list_dispatches(settings: Settings, run_id: str) -> list[DispatchRecord]:
+    with connect(settings) as connection:
+        _fetch_run_row(connection, run_id)
+        rows = connection.execute(
+            """
+            SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
+                   worktree_name, worktree_path, repo_root, base_commit, prompt_path,
+                   startup_commands_json, status, status_detail, created_at, updated_at
+            FROM dispatches
+            WHERE run_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+    return [_dispatch_from_row(row) for row in rows]
+
+
 def recover_run(
     settings: Settings,
     run_id: str,
@@ -253,6 +387,24 @@ def recover_run(
             request,
             created_at,
         )
+        invalidated_dispatches = _invalidate_prepared_dispatches(
+            connection,
+            workspace,
+            run_id,
+            detail="Recovery changed the task graph after the dispatch was prepared.",
+            updated_at=created_at,
+        )
+        if invalidated_dispatches:
+            _log_event(
+                connection,
+                run_id,
+                "decision",
+                (
+                    f"Invalidated {len(invalidated_dispatches)} prepared dispatch record(s) "
+                    "after recovery changed task state."
+                ),
+                created_at,
+            )
         _update_run_status(connection, run_id)
         updated_run_row = _fetch_run_row(connection, run_id)
         snapshot = _build_recovery_snapshot(connection, updated_run_row)
@@ -304,16 +456,6 @@ def advance_run(settings: Settings, run_id: str) -> ExecutionRecord:
             connection.commit()
             raise ValueError("No safe next action")
 
-        _log_event(
-            connection,
-            run_id,
-            "decision",
-            (
-                f"Planner selected action '{recommendation.action}' for task "
-                f"'{recommendation.task_id}' because {recommendation.reason}"
-            ),
-            created_at,
-        )
         _append_advance_record(
             workspace,
             {
@@ -330,6 +472,7 @@ def advance_run(settings: Settings, run_id: str) -> ExecutionRecord:
             task_id=recommendation.task_id,
             action=recommendation.action,
         ),
+        planned=True,
     )
 
 
@@ -337,6 +480,8 @@ def create_execution(
     settings: Settings,
     run_id: str,
     request: CreateExecutionRequest,
+    *,
+    planned: bool = False,
 ) -> ExecutionRecord:
     start_time = utc_now()
     action_spec = ACTION_CATALOG.get(request.action)
@@ -366,7 +511,20 @@ def create_execution(
             connection.commit()
             raise ValueError(f"Action '{request.action}' is not allowed")
 
-        if task_row["status"] not in {"ready", "running"}:
+        if task_row["status"] == "running":
+            _block_execution_action(
+                connection,
+                run_id,
+                (
+                    f"Blocked execution action '{request.action}' because task "
+                    f"'{task_row['title']}' is already running."
+                ),
+                start_time,
+            )
+            _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
+            connection.commit()
+            raise ValueError("Task is already running")
+        if task_row["status"] != "ready":
             _block_execution_action(
                 connection,
                 run_id,
@@ -402,16 +560,40 @@ def create_execution(
         stderr_path = workspace / "executions" / execution_id / "stderr.txt"
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
 
-        connection.execute(
+        claimed_task = connection.execute(
             """
             UPDATE tasks
             SET status = 'running',
                 started_at = COALESCE(started_at, ?),
                 last_error = NULL
-            WHERE id = ? AND run_id = ?
+            WHERE id = ? AND run_id = ? AND status = 'ready'
             """,
             (start_time, task_row["id"], run_id),
         )
+        if claimed_task.rowcount != 1:
+            _block_execution_action(
+                connection,
+                run_id,
+                (
+                    f"Blocked execution action '{request.action}' because task "
+                    f"'{task_row['title']}' could not be claimed safely."
+                ),
+                start_time,
+            )
+            _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
+            connection.commit()
+            raise ValueError("Task could not be claimed for execution")
+        if planned:
+            _log_event(
+                connection,
+                run_id,
+                "decision",
+                (
+                    f"Planner selected action '{request.action}' for task "
+                    f"'{task_row['id']}' after it was claimed safely."
+                ),
+                start_time,
+            )
         _log_event(
             connection,
             run_id,
@@ -506,6 +688,24 @@ def create_execution(
                 f"Task execution failed for '{request.action}'.",
                 finish_time,
             )
+        invalidated_dispatches = _invalidate_prepared_dispatches(
+            connection,
+            workspace,
+            run_id,
+            detail="Execution changed the task graph after the dispatch was prepared.",
+            updated_at=finish_time,
+        )
+        if invalidated_dispatches:
+            _log_event(
+                connection,
+                run_id,
+                "decision",
+                (
+                    f"Invalidated {len(invalidated_dispatches)} prepared dispatch record(s) "
+                    "after execution changed task state."
+                ),
+                finish_time,
+            )
         _update_run_status(connection, run_id)
         _write_recovery_snapshot(
             workspace,
@@ -572,6 +772,13 @@ def _run_mapped_action(workspace: Path, command: list[str]) -> subprocess.Comple
             stdout=stdout,
             stderr=stderr.strip(),
         )
+    except OSError as error:
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=127,
+            stdout="",
+            stderr=f"{error.__class__.__name__}: {error}",
+        )
 
 
 def _write_initial_artifacts(
@@ -606,6 +813,13 @@ def _append_recovery_action_record(workspace: Path, payload: dict[str, object]) 
         handle.write("\n")
 
 
+def _append_dispatch_record(workspace: Path, dispatch: DispatchRecord) -> None:
+    artifact_path = workspace / "artifacts" / DISPATCHES_ARTIFACT_NAME
+    with artifact_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(dispatch.model_dump(mode="json")))
+        handle.write("\n")
+
+
 def _persist_recovery_snapshot(settings: Settings, run_id: str) -> None:
     with connect(settings) as connection:
         run_row = _fetch_run_row(connection, run_id)
@@ -621,14 +835,225 @@ def _write_recovery_snapshot(workspace: Path, snapshot: RecoverySnapshot) -> Non
     )
 
 
+def _resolve_repo_head(settings: Settings) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=settings.repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
+    commit = completed.stdout.strip()
+    if completed.returncode != 0 or not commit:
+        raise ValueError("Cannot prepare dispatch without a pinned git commit")
+    return commit
+
+
 def _recovery_artifact_paths(workspace: Path) -> RecoveryArtifactPaths:
     return RecoveryArtifactPaths(
         intent=str(workspace / "intent.md"),
         initial_plan=str(workspace / "artifacts" / "initial-plan.json"),
         advance_log=str(workspace / "artifacts" / "advance-decisions.jsonl"),
+        dispatches=str(workspace / "artifacts" / DISPATCHES_ARTIFACT_NAME),
         recovery_actions=str(workspace / "artifacts" / RECOVERY_ACTIONS_ARTIFACT_NAME),
         recovery_snapshot=str(workspace / "artifacts" / RECOVERY_ARTIFACT_NAME),
     )
+
+
+def _build_dispatch_record(
+    settings: Settings,
+    run_row: sqlite3.Row,
+    recommendation: NextActionRecord,
+    *,
+    base_commit: str,
+    created_at: str,
+) -> DispatchRecord:
+    dispatch_id = f"dispatch_{uuid4().hex[:12]}"
+    worktree_name = _dispatch_worktree_name(run_row["id"], recommendation.task_kind)
+    worktree_path = settings.worktree_root / worktree_name
+    prompt_path = Path(run_row["workspace_path"]) / "artifacts" / "dispatches" / (
+        f"{dispatch_id}.md"
+    )
+    return DispatchRecord(
+        id=dispatch_id,
+        run_id=str(run_row["id"]),
+        task_id=recommendation.task_id,
+        task_kind=recommendation.task_kind,
+        task_title=recommendation.task_title,
+        agent_role=DEFAULT_AGENT_ROLE_BY_TASK_KIND.get(
+            recommendation.task_kind,
+            "implementer",
+        ),
+        branch_name=f"codex/{worktree_name}",
+        worktree_name=worktree_name,
+        worktree_path=str(worktree_path),
+        repo_root=str(settings.repo_root),
+        base_commit=base_commit,
+        prompt_path=str(prompt_path),
+        startup_commands=[
+            f"make worktree NAME={worktree_name} BASE_REF={base_commit}",
+            f"cd .worktrees/{worktree_name}",
+        ],
+        status="prepared",
+        status_detail="Prepared for the current safe task and pinned to a git commit.",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+def _dispatch_worktree_name(run_id: object, task_kind: str) -> str:
+    run_slug = str(run_id).replace("_", "-")
+    if len(run_slug) > 24:
+        run_slug = run_slug[-24:]
+    return f"{run_slug}-{task_kind}"
+
+
+def _write_dispatch_prompt(
+    workspace: Path,
+    dispatch: DispatchRecord,
+    *,
+    intent: str,
+    recommendation: NextActionRecord,
+) -> None:
+    prompt_path = Path(dispatch.prompt_path)
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    prompt_path.write_text(
+        "\n".join(
+            [
+                f"# Dispatch Work Order: {dispatch.id}",
+                "",
+                f"- Run: {dispatch.run_id}",
+                f"- Task: {dispatch.task_title} ({dispatch.task_kind})",
+                f"- Agent Role: {dispatch.agent_role}",
+                f"- Suggested Action: {recommendation.action}",
+                f"- Suggested Command: {' '.join(recommendation.command_argv)}",
+                f"- Base Commit: {dispatch.base_commit}",
+                "",
+                "## Intent",
+                intent,
+                "",
+                "## Startup",
+                *[f"- {command}" for command in dispatch.startup_commands],
+                "",
+                "## Context",
+                f"- Workspace: {workspace}",
+                f"- Repo Root: {dispatch.repo_root}",
+                f"- Prompt Path: {dispatch.prompt_path}",
+                f"- Worktree Path: {dispatch.worktree_path}",
+                "- Note: the worktree bootstraps from the pinned base commit above.",
+                "- Note: commit any required local changes before materializing the worktree.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _reconcile_prepared_dispatches(
+    connection: sqlite3.Connection,
+    workspace: Path,
+    run_id: str,
+    *,
+    task_id: str,
+    base_commit: str,
+    updated_at: str,
+) -> tuple[DispatchRecord | None, int]:
+    rows = connection.execute(
+        """
+        SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
+               worktree_name, worktree_path, repo_root, base_commit, prompt_path,
+               startup_commands_json, status, status_detail, created_at, updated_at
+        FROM dispatches
+        WHERE run_id = ? AND status = 'prepared'
+        ORDER BY created_at DESC, id DESC
+        """,
+        (run_id,),
+    ).fetchall()
+
+    active_dispatch: DispatchRecord | None = None
+    superseded_count = 0
+    for row in rows:
+        dispatch = _dispatch_from_row(row)
+        if (
+            active_dispatch is None
+            and dispatch.task_id == task_id
+            and dispatch.base_commit == base_commit
+        ):
+            active_dispatch = dispatch
+            continue
+
+        superseded = _update_dispatch_status(
+            connection,
+            dispatch,
+            status="superseded",
+            detail="Superseded by a newer or different safe dispatch target.",
+            updated_at=updated_at,
+        )
+        _append_dispatch_record(workspace, superseded)
+        superseded_count += 1
+
+    return active_dispatch, superseded_count
+
+
+def _invalidate_prepared_dispatches(
+    connection: sqlite3.Connection,
+    workspace: Path,
+    run_id: str,
+    *,
+    detail: str,
+    updated_at: str,
+) -> list[DispatchRecord]:
+    rows = connection.execute(
+        """
+        SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
+               worktree_name, worktree_path, repo_root, base_commit, prompt_path,
+               startup_commands_json, status, status_detail, created_at, updated_at
+        FROM dispatches
+        WHERE run_id = ? AND status = 'prepared'
+        ORDER BY created_at ASC, id ASC
+        """,
+        (run_id,),
+    ).fetchall()
+
+    invalidated: list[DispatchRecord] = []
+    for row in rows:
+        dispatch = _dispatch_from_row(row)
+        updated = _update_dispatch_status(
+            connection,
+            dispatch,
+            status="invalidated",
+            detail=detail,
+            updated_at=updated_at,
+        )
+        _append_dispatch_record(workspace, updated)
+        invalidated.append(updated)
+    return invalidated
+
+
+def _update_dispatch_status(
+    connection: sqlite3.Connection,
+    dispatch: DispatchRecord,
+    *,
+    status: str,
+    detail: str,
+    updated_at: str,
+) -> DispatchRecord:
+    updated_dispatch = dispatch.model_copy(
+        update={
+            "status": status,
+            "status_detail": detail,
+            "updated_at": updated_at,
+        }
+    )
+    connection.execute(
+        """
+        UPDATE dispatches
+        SET status = ?, status_detail = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (status, detail, updated_at, dispatch.id),
+    )
+    return updated_dispatch
 
 
 def _fetch_run_row(connection: sqlite3.Connection, run_id: str) -> sqlite3.Row:
@@ -882,6 +1307,7 @@ def _build_recovery_snapshot(
     next_action, problem = _resolve_next_action(connection, run_row)
     current_task = _recovery_current_task(task_rows, next_action)
     last_execution = _fetch_latest_execution(connection, run_id)
+    latest_dispatch = _fetch_latest_dispatch(connection, run_id)
     latest_decision = _read_latest_decision_summary(workspace)
     available_recovery_actions = _available_recovery_actions(
         task_rows,
@@ -893,6 +1319,7 @@ def _build_recovery_snapshot(
         current_task=current_task,
         next_action=next_action,
         last_execution=last_execution,
+        latest_dispatch=latest_dispatch,
         problem=problem,
         ready_count=sum(1 for row in task_rows if row["status"] == "ready"),
     )
@@ -908,6 +1335,7 @@ def _build_recovery_snapshot(
         current_task=current_task,
         next_action=next_action,
         last_execution=last_execution,
+        latest_dispatch=latest_dispatch,
         latest_decision=latest_decision,
         available_recovery_actions=available_recovery_actions,
         artifact_paths=_recovery_artifact_paths(workspace),
@@ -963,6 +1391,27 @@ def _fetch_latest_execution(
     return _execution_from_row(row)
 
 
+def _fetch_latest_dispatch(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> DispatchRecord | None:
+    row = connection.execute(
+        """
+        SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
+               worktree_name, worktree_path, repo_root, base_commit, prompt_path,
+               startup_commands_json, status, status_detail, created_at, updated_at
+        FROM dispatches
+        WHERE run_id = ?
+        ORDER BY updated_at DESC, created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _dispatch_from_row(row)
+
+
 def _read_latest_decision_summary(workspace: Path) -> RecoveryDecisionSummary | None:
     artifact_path = workspace / "artifacts" / "advance-decisions.jsonl"
     if not artifact_path.exists():
@@ -988,6 +1437,7 @@ def _recovery_guidance(
     current_task: RecoveryTaskSummary | None,
     next_action: NextActionRecord | None,
     last_execution: ExecutionRecord | None,
+    latest_dispatch: DispatchRecord | None,
     problem: str | None,
     ready_count: int,
 ) -> tuple[str, str, str | None, list[str]]:
@@ -1011,17 +1461,33 @@ def _recovery_guidance(
         )
 
     if next_action is not None and current_task is not None:
+        summary = (
+            f"Run can advance with '{next_action.action}' on task "
+            f"'{current_task.title}'."
+        )
+        restart_hints = [
+            f"Call POST /api/runs/{run_id}/advance to continue.",
+            f"Use GET /api/runs/{run_id}/next-action to preview the safe next step.",
+        ]
+        if (
+            latest_dispatch is not None
+            and latest_dispatch.status == "prepared"
+            and latest_dispatch.task_id == current_task.id
+        ):
+            summary += " A pinned dispatch is already prepared for this task."
+            restart_hints.append(
+                f"Inspect {latest_dispatch.prompt_path} or GET /api/runs/{run_id}/dispatches "
+                "before preparing another handoff."
+            )
+        else:
+            restart_hints.append(
+                f"Call POST /api/runs/{run_id}/dispatches to prepare a pinned worktree handoff."
+            )
         return (
             "ready",
-            (
-                f"Run can advance with '{next_action.action}' on task "
-                f"'{current_task.title}'."
-            ),
+            summary,
             None,
-            [
-                f"Call POST /api/runs/{run_id}/advance to continue.",
-                f"Use GET /api/runs/{run_id}/next-action to preview the safe next step.",
-            ],
+            restart_hints,
         )
 
     blocking_reason = problem
@@ -1172,6 +1638,23 @@ def _execution_from_row(row: sqlite3.Row) -> ExecutionRecord:
     payload = dict(row)
     payload["command_argv"] = json.loads(payload.pop("command_argv_json"))
     return ExecutionRecord(**payload)
+
+
+def _dispatch_from_row(row: sqlite3.Row) -> DispatchRecord:
+    payload = dict(row)
+    base_commit = payload.get("base_commit") or "HEAD"
+    startup_commands_json = payload.pop("startup_commands_json", None)
+    if startup_commands_json:
+        payload["startup_commands"] = json.loads(startup_commands_json)
+    else:
+        payload["startup_commands"] = [
+            f"make worktree NAME={payload['worktree_name']} BASE_REF={base_commit}",
+            f"cd .worktrees/{payload['worktree_name']}",
+        ]
+    payload["repo_root"] = payload.get("repo_root") or ""
+    payload["base_commit"] = base_commit
+    payload["updated_at"] = payload.get("updated_at") or payload["created_at"]
+    return DispatchRecord(**payload)
 
 
 def _last_error_message(stderr: str) -> str | None:

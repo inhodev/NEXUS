@@ -8,6 +8,7 @@ The current real slice is a local-first native control plane. It can:
 - expose an action catalog and task-scoped available actions,
 - recommend the next safe action for the single ready task,
 - expose a resumable recovery snapshot for the current run state,
+- prepare an idempotent worktree-backed dispatch handoff for the current ready task,
 - create an isolated workspace,
 - write artifacts,
 - persist run state/events in SQLite,
@@ -47,7 +48,7 @@ make test
 Use hidden project-local worktrees so parallel threads stay isolated and bootstrapped the same way:
 
 ```bash
-make worktree NAME=feature-local-slice
+make worktree NAME=feature-local-slice BASE_REF=<commit>
 cd .worktrees/feature-local-slice
 make setup
 ```
@@ -76,12 +77,16 @@ Every worktree shares the same workflow:
 
 ## Current API Slice
 
-- `GET /api/runs/{run_id}/recovery` exposes the resumable run snapshot, current task focus, latest decision, last execution, and restart hints.
+- `GET /api/runs/{run_id}/recovery` exposes the resumable run snapshot, current task focus, latest dispatch, latest decision, last execution, and restart hints.
+- `GET /api/runs/{run_id}/dispatches` and `POST /api/runs/{run_id}/dispatches` expose and materialize pinned worktree handoff records for the current ready task.
 - `POST /api/runs/{run_id}/recover` applies a small set of operator-driven recovery transitions without manual SQLite edits.
 - `GET /api/runs/{run_id}/next-action` previews the only safe next action without mutating run state.
 - `POST /api/runs/{run_id}/advance` records the planner decision and executes the bounded action.
 - `POST /api/runs/{run_id}/executions` remains task-scoped and now requires an explicit `task_id`.
 - Planner decisions are appended to `artifacts/advance-decisions.jsonl` inside the run workspace.
+- Dispatch handoffs are appended to `artifacts/dispatches.jsonl`, write task prompts under `artifacts/dispatches/`, and pin `repo_root` plus `base_commit`.
+- Repeated `POST /api/runs/{run_id}/dispatches` calls reuse the current prepared handoff for the same safe task instead of duplicating it.
+- Execution or recovery changes invalidate stale prepared dispatches before the run moves forward.
 - Recovery transitions are appended to `artifacts/recovery-actions.jsonl`.
 - The latest resumable snapshot is stored in `artifacts/run-recovery.json`.
 
@@ -91,8 +96,10 @@ If `GET /api/runs/{run_id}/next-action` or `POST /api/runs/{run_id}/advance` ret
 - inspect `GET /api/runs/{run_id}/recovery` first for the blocking reason and restart hints
 - inspect `available_recovery_actions` in that snapshot for safe operator actions
 - call `POST /api/runs/{run_id}/recover` only with one of those advertised recovery actions
+- if the run is ready again, call `POST /api/runs/{run_id}/dispatches` to prepare a worktree-backed handoff
 - inspect `GET /api/runs/{run_id}` for task statuses and recent events
 - inspect `artifacts/advance-decisions.jsonl` for the latest planner decision record
+- inspect `artifacts/dispatches.jsonl` and `artifacts/dispatches/*.md` for the latest handoff prompt and any invalidated/superseded dispatch history
 - inspect `artifacts/recovery-actions.jsonl` for the applied or blocked recovery history
 - inspect `executions/<id>/stdout.txt` and `executions/<id>/stderr.txt` when the latest execution failed
 
@@ -109,7 +116,7 @@ Stable diagnostic keys:
 
 ## Strongest Next Slice
 
-The next highest-leverage step is to connect the control plane to real isolated work:
-- dispatch approved tasks into Codex worktrees or bounded worker flows,
-- preserve auditable agent-level results alongside planner/recovery artifacts,
+The next highest-leverage step is to connect prepared pinned dispatches to real agent execution:
+- claim a prepared dispatch into an active worktree lifecycle,
+- preserve auditable agent-level results alongside planner/recovery/dispatch artifacts,
 - and expand the approved action graph without opening arbitrary shell access.

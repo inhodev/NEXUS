@@ -51,6 +51,26 @@ CREATE TABLE IF NOT EXISTS executions (
     stdout_path TEXT NOT NULL,
     stderr_path TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS dispatches (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    task_kind TEXT NOT NULL,
+    task_title TEXT NOT NULL,
+    agent_role TEXT NOT NULL,
+    branch_name TEXT NOT NULL,
+    worktree_name TEXT NOT NULL,
+    worktree_path TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    base_commit TEXT NOT NULL,
+    prompt_path TEXT NOT NULL,
+    startup_commands_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    status_detail TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -61,6 +81,11 @@ def initialize_database(settings: Settings) -> None:
         _ensure_column(connection, "tasks", "started_at", "TEXT")
         _ensure_column(connection, "tasks", "finished_at", "TEXT")
         _ensure_column(connection, "tasks", "last_error", "TEXT")
+        _ensure_column(connection, "dispatches", "repo_root", "TEXT")
+        _ensure_column(connection, "dispatches", "base_commit", "TEXT")
+        _ensure_column(connection, "dispatches", "startup_commands_json", "TEXT")
+        _ensure_column(connection, "dispatches", "status_detail", "TEXT")
+        _ensure_column(connection, "dispatches", "updated_at", "TEXT")
 
 
 def _ensure_column(

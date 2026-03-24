@@ -8,6 +8,7 @@ RunStatus = Literal["queued", "ready", "running", "blocked", "failed", "complete
 TaskStatus = Literal["pending", "ready", "running", "blocked", "failed", "completed"]
 ExecutionStatus = Literal["running", "completed", "failed", "blocked"]
 RecoveryStatus = Literal["ready", "running", "attention_required", "completed"]
+DispatchStatus = Literal["prepared", "superseded", "invalidated"]
 
 
 class CreateRunRequest(BaseModel):
@@ -112,8 +113,29 @@ class RecoveryArtifactPaths(BaseModel):
     intent: str
     initial_plan: str
     advance_log: str
+    dispatches: str
     recovery_actions: str
     recovery_snapshot: str
+
+
+class DispatchRecord(BaseModel):
+    id: str
+    run_id: str
+    task_id: str
+    task_kind: str
+    task_title: str
+    agent_role: str
+    branch_name: str
+    worktree_name: str
+    worktree_path: str
+    repo_root: str
+    base_commit: str
+    prompt_path: str
+    startup_commands: list[str] = Field(default_factory=list)
+    status: DispatchStatus
+    status_detail: str | None = None
+    created_at: str
+    updated_at: str
 
 
 class RecoverySnapshot(BaseModel):
@@ -127,6 +149,7 @@ class RecoverySnapshot(BaseModel):
     current_task: RecoveryTaskSummary | None = None
     next_action: NextActionRecord | None = None
     last_execution: ExecutionRecord | None = None
+    latest_dispatch: DispatchRecord | None = None
     latest_decision: RecoveryDecisionSummary | None = None
     available_recovery_actions: list[RecoveryActionOption] = Field(default_factory=list)
     artifact_paths: RecoveryArtifactPaths

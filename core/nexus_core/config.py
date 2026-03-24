@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     def database_path(self) -> Path:
         return self.state_dir / "nexus.db"
 
+    @property
+    def repo_root(self) -> Path:
+        return REPO_ROOT
+
+    @property
+    def worktree_root(self) -> Path:
+        return self.repo_root / ".worktrees"
+
     def ensure_directories(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.workspace_root.mkdir(parents=True, exist_ok=True)

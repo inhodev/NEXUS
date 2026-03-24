@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 
 NAME ?=
+BASE_REF ?=
 
 .PHONY: help setup run test smoke doctor worktree
 
@@ -12,7 +13,7 @@ help:
 		'  make test            Run lint and tests for the current slice' \
 		'  make smoke           Start the API temporarily and smoke-check it' \
 		'  make doctor          Report local prerequisites' \
-		'  make worktree NAME=x Bootstrap .worktrees/x for Codex threads'
+		'  make worktree NAME=x BASE_REF=<sha> Bootstrap .worktrees/x for Codex threads'
 
 setup:
 	@zsh ./.codex/actions/setup.sh
@@ -31,4 +32,4 @@ doctor:
 
 worktree:
 	@test -n "$(NAME)" || (printf '%s\n' 'error: NAME is required, for example: make worktree NAME=agent-core' >&2; exit 1)
-	@zsh ./.codex/setup/create-worktree.sh "$(NAME)"
+	@zsh ./.codex/setup/create-worktree.sh "$(NAME)" "$(BASE_REF)"

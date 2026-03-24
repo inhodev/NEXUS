@@ -34,7 +34,6 @@ def test_create_request_materializes_workspace_and_tasks(tmp_path: Path) -> None
         "planner",
         "architect",
         "implementer",
-        "tester",
         "reviewer",
     ]
     assert response.status_code == 201
@@ -148,14 +147,148 @@ def test_recovery_snapshot_for_ready_run(tmp_path: Path) -> None:
     assert snapshot["can_advance"] is True
     assert snapshot["current_task"]["id"] == run["tasks"][0]["id"]
     assert snapshot["next_action"]["action"] == "inspect-workspace"
+    assert snapshot["latest_dispatch"] is None
     assert snapshot["latest_decision"] is None
     assert snapshot["available_recovery_actions"] == []
     assert "POST /api/runs/" in snapshot["restart_hints"][0]
+    assert snapshot["artifact_paths"]["dispatches"].endswith("dispatches.jsonl")
 
     artifact_path = Path(snapshot["artifact_paths"]["recovery_snapshot"])
     assert artifact_path.exists()
     artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
     assert artifact_payload["next_action"]["action"] == "inspect-workspace"
+
+
+def test_dispatch_prepares_work_order_for_ready_task(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Prepare a worktree-backed handoff for the current ready task"},
+        )
+        run = create_response.json()
+        dispatch_response = client.post(f"/api/runs/{run['id']}/dispatches")
+        dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+        detail_response = client.get(f"/api/runs/{run['id']}")
+
+    assert dispatch_response.status_code == 201
+    dispatch = dispatch_response.json()
+    assert dispatch["run_id"] == run["id"]
+    assert dispatch["task_id"] == run["tasks"][0]["id"]
+    assert dispatch["task_kind"] == "intake"
+    assert dispatch["agent_role"] == "planner"
+    assert dispatch["status"] == "prepared"
+    assert (
+        dispatch["status_detail"]
+        == "Prepared for the current safe task and pinned to a git commit."
+    )
+    assert dispatch["branch_name"].startswith("codex/")
+    assert Path(dispatch["repo_root"]).name == "NEXUS"
+    assert len(dispatch["base_commit"]) == 40
+    assert dispatch["worktree_path"].endswith(dispatch["worktree_name"])
+    assert dispatch["startup_commands"][0] == (
+        f"make worktree NAME={dispatch['worktree_name']} BASE_REF={dispatch['base_commit']}"
+    )
+    assert Path(dispatch["prompt_path"]).exists()
+    assert Path(dispatch["prompt_path"]).name == f"{dispatch['id']}.md"
+    assert "Record request and local constraints" in Path(dispatch["prompt_path"]).read_text(
+        encoding="utf-8"
+    )
+    assert dispatch["base_commit"] in Path(dispatch["prompt_path"]).read_text(encoding="utf-8")
+
+    dispatches = dispatches_response.json()
+    assert len(dispatches) == 1
+    assert dispatches[0]["id"] == dispatch["id"]
+    assert dispatches[0]["startup_commands"] == dispatch["startup_commands"]
+
+    recovery = recovery_response.json()
+    assert recovery["latest_dispatch"]["id"] == dispatch["id"]
+    assert recovery["latest_dispatch"]["status"] == "prepared"
+    assert "already prepared" in recovery["summary"]
+    assert recovery["artifact_paths"]["dispatches"].endswith("dispatches.jsonl")
+
+    detail = detail_response.json()
+    assert any("Prepared dispatch" in event["message"] for event in detail["events"])
+
+    dispatch_log = Path(run["workspace_path"]) / "artifacts" / "dispatches.jsonl"
+    assert dispatch_log.exists()
+    dispatch_artifact = json.loads(dispatch_log.read_text(encoding="utf-8").splitlines()[-1])
+    assert dispatch_artifact["id"] == dispatch["id"]
+    assert dispatch_artifact["agent_role"] == "planner"
+    assert dispatch_artifact["base_commit"] == dispatch["base_commit"]
+    assert dispatch_artifact["status"] == "prepared"
+
+
+def test_dispatch_reuses_existing_prepared_work_order(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Keep dispatch preparation idempotent for the same safe task"},
+        )
+        run = create_response.json()
+
+        first_dispatch_response = client.post(f"/api/runs/{run['id']}/dispatches")
+        second_dispatch_response = client.post(f"/api/runs/{run['id']}/dispatches")
+        dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+
+    assert first_dispatch_response.status_code == 201
+    assert second_dispatch_response.status_code == 201
+    first_dispatch = first_dispatch_response.json()
+    second_dispatch = second_dispatch_response.json()
+    assert second_dispatch["id"] == first_dispatch["id"]
+
+    dispatches = dispatches_response.json()
+    assert len(dispatches) == 1
+    assert dispatches[0]["status"] == "prepared"
+
+    recovery = recovery_response.json()
+    assert recovery["latest_dispatch"]["id"] == first_dispatch["id"]
+    assert recovery["latest_dispatch"]["status"] == "prepared"
+
+    dispatch_log = Path(run["workspace_path"]) / "artifacts" / "dispatches.jsonl"
+    records = [json.loads(line) for line in dispatch_log.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 1
+    assert records[0]["id"] == first_dispatch["id"]
+
+
+def test_execution_invalidates_prepared_dispatch(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Invalidate stale work orders when execution changes the task graph"},
+        )
+        run = create_response.json()
+
+        dispatch_response = client.post(f"/api/runs/{run['id']}/dispatches")
+        assert dispatch_response.status_code == 201
+
+        advance_response = client.post(f"/api/runs/{run['id']}/advance")
+        dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+        detail_response = client.get(f"/api/runs/{run['id']}")
+
+    assert advance_response.status_code == 200
+    dispatches = dispatches_response.json()
+    assert len(dispatches) == 1
+    dispatch = dispatches[0]
+    assert dispatch["status"] == "invalidated"
+    assert "Execution changed the task graph" in dispatch["status_detail"]
+    assert dispatch["updated_at"] != dispatch["created_at"]
+
+    recovery = recovery_response.json()
+    assert recovery["latest_dispatch"]["id"] == dispatch["id"]
+    assert recovery["latest_dispatch"]["status"] == "invalidated"
+
+    dispatch_log = Path(run["workspace_path"]) / "artifacts" / "dispatches.jsonl"
+    records = [json.loads(line) for line in dispatch_log.read_text(encoding="utf-8").splitlines()]
+    assert [record["status"] for record in records] == ["prepared", "invalidated"]
+
+    detail = detail_response.json()
+    assert any(
+        "Invalidated 1 prepared dispatch record" in event["message"]
+        for event in detail["events"]
+    )
 
 
 def test_next_action_endpoint_is_read_only(tmp_path: Path) -> None:
@@ -334,6 +467,33 @@ def test_advance_can_complete_default_task_graph(tmp_path: Path) -> None:
     assert no_advance_response.status_code == 409
 
 
+def test_dispatch_refuses_when_no_safe_target_exists(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Refuse to dispatch when the task graph is ambiguous"},
+        )
+        run = create_response.json()
+        settings = client.app.state.settings
+
+        with connect(settings) as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'ready'
+                WHERE id = ? AND run_id = ?
+                """,
+                (run["tasks"][1]["id"], run["id"]),
+            )
+
+        dispatch_response = client.post(f"/api/runs/{run['id']}/dispatches")
+        dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
+
+    assert dispatch_response.status_code == 409
+    assert dispatch_response.json()["detail"] == "No safe dispatch target"
+    assert dispatches_response.json() == []
+
+
 def test_blocked_execution_records_event_without_advancing_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         create_response = client.post(
@@ -356,6 +516,45 @@ def test_blocked_execution_records_event_without_advancing_task(tmp_path: Path) 
     assert detail["tasks"][0]["status"] == "ready"
     assert detail["tasks"][1]["status"] == "pending"
     assert any("Blocked execution action" in event["message"] for event in detail["events"])
+
+
+def test_running_task_cannot_be_reexecuted(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Reject launching another execution for a running task"},
+        )
+        run = create_response.json()
+        settings = client.app.state.settings
+
+        with connect(settings) as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'running'
+                WHERE id = ? AND run_id = ?
+                """,
+                (run["tasks"][0]["id"], run["id"]),
+            )
+            connection.execute(
+                """
+                UPDATE runs
+                SET status = 'running'
+                WHERE id = ?
+                """,
+                (run["id"],),
+            )
+
+        blocked_response = client.post(
+            f"/api/runs/{run['id']}/executions",
+            json={"task_id": run["tasks"][0]["id"], "action": "inspect-workspace"},
+        )
+        detail_response = client.get(f"/api/runs/{run['id']}")
+
+    assert blocked_response.status_code == 400
+    assert blocked_response.json()["detail"] == "Task is already running"
+    detail = detail_response.json()
+    assert any("already running" in event["message"] for event in detail["events"])
 
 
 def test_completed_task_reexecution_is_rejected_and_logged(tmp_path: Path) -> None:
@@ -387,6 +586,50 @@ def test_completed_task_reexecution_is_rejected_and_logged(tmp_path: Path) -> No
     )
     assert detail["tasks"][0]["status"] == "completed"
     assert detail["tasks"][1]["status"] == "ready"
+
+
+def test_host_command_launch_failure_stays_recoverable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from nexus_core import service as service_module
+
+    def raise_file_not_found(*_args, **_kwargs):
+        raise FileNotFoundError("pwd missing")
+
+    monkeypatch.setattr(service_module.subprocess, "run", raise_file_not_found)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Keep recovery usable when a host command cannot start"},
+        )
+        run = create_response.json()
+
+        execution_response = client.post(
+            f"/api/runs/{run['id']}/executions",
+            json={"task_id": run["tasks"][0]["id"], "action": "inspect-workspace"},
+        )
+        detail_response = client.get(f"/api/runs/{run['id']}")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+
+    assert execution_response.status_code == 201
+    execution = execution_response.json()
+    assert execution["status"] == "failed"
+    assert execution["exit_code"] == 127
+    assert Path(execution["stdout_path"]).exists()
+    assert Path(execution["stderr_path"]).exists()
+
+    detail = detail_response.json()
+    assert detail["status"] == "failed"
+    assert detail["tasks"][0]["status"] == "failed"
+    assert "pwd missing" in detail["tasks"][0]["last_error"]
+
+    recovery = recovery_response.json()
+    assert recovery["run_status"] == "failed"
+    assert recovery["recovery_status"] == "attention_required"
+    assert recovery["last_execution"]["id"] == execution["id"]
+    assert recovery["last_execution"]["status"] == "failed"
 
 
 def test_task_scoped_action_rules_are_enforced(tmp_path: Path) -> None:
