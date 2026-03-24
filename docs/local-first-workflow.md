@@ -43,7 +43,8 @@ Expected first-slice behavior:
 - a request can be registered
 - run and task state can be queried
 - each task exposes a small allowed action set
-- a bounded execution action can run inside the workspace
+- the next safe action can be previewed without mutating the run
+- the planner can advance the run with a bounded workspace action
 - artifacts and logs stay local
 
 Useful API checks:
@@ -54,6 +55,8 @@ curl -s http://127.0.0.1:8000/api/actions
 curl -s -X POST http://127.0.0.1:8000/api/runs -H 'content-type: application/json' -d '{"intent":"Build a task manager with audit logs"}'
 curl -s http://127.0.0.1:8000/api/runs
 curl -s http://127.0.0.1:8000/api/system/summary
+curl -s http://127.0.0.1:8000/api/runs/<run-id>/next-action
+curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/advance
 curl -s http://127.0.0.1:8000/api/runs/<run-id>/executions
 ```
 

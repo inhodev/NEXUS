@@ -6,9 +6,11 @@ The current real slice is a local-first native control plane. It can:
 - accept a run request,
 - materialize a default task graph,
 - expose an action catalog and task-scoped available actions,
+- recommend the next safe action for the single ready task,
 - create an isolated workspace,
 - write artifacts,
 - persist run state/events in SQLite,
+- append planner decisions to local artifacts,
 - and execute a small mapped action set inside the run workspace to advance tasks with evidence.
 
 Docker is intentionally not part of the current developer workflow.
@@ -71,9 +73,15 @@ Every worktree shares the same workflow:
 - Filesystem artifacts under `.nexus/workspaces/` replace containerized local orchestration.
 - Docker remains a future compatibility target, not a current requirement.
 
+## Current API Slice
+
+- `GET /api/runs/{run_id}/next-action` previews the only safe next action without mutating run state.
+- `POST /api/runs/{run_id}/advance` records the planner decision and executes the bounded action.
+- Planner decisions are appended to `artifacts/advance-decisions.jsonl` inside the run workspace.
+
 ## Strongest Next Slice
 
-The next highest-leverage step is to turn the bounded execution hook into a real planner/executor loop:
-- map each task kind to one or more approved server-side actions,
-- store richer execution summaries and restart hints,
-- and let the control plane progress a run across multiple tasks without opening arbitrary shell access.
+The next highest-leverage step is to make the planner/executor loop more recoverable:
+- store richer decision metadata and restart hints alongside execution artifacts,
+- introduce explicit blocked/recovery transitions when a task cannot advance safely,
+- and expand the approved action graph without opening arbitrary shell access.

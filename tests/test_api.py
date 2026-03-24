@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from nexus_core.app import create_app
 from nexus_core.config import Settings
+from nexus_core.db import connect
 
 
 def make_client(tmp_path: Path) -> TestClient:
@@ -103,6 +105,82 @@ def test_execution_advances_task_and_records_outputs(tmp_path: Path) -> None:
     assert executions[0]["action"] == "inspect-workspace"
 
 
+def test_next_action_endpoint_is_read_only(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Find the next safe action without mutating the run"},
+        )
+        run = create_response.json()
+
+        next_action_response = client.get(f"/api/runs/{run['id']}/next-action")
+        detail_response = client.get(f"/api/runs/{run['id']}")
+
+    assert next_action_response.status_code == 200
+    payload = next_action_response.json()
+    assert payload["task_id"] == run["tasks"][0]["id"]
+    assert payload["task_kind"] == "intake"
+    assert payload["action"] == "inspect-workspace"
+    assert payload["command_argv"] == ["pwd"]
+    assert "default safe action" in payload["reason"]
+
+    detail = detail_response.json()
+    assert detail["tasks"][0]["status"] == "ready"
+    assert not any("Planner selected action" in event["message"] for event in detail["events"])
+    assert not (Path(run["workspace_path"]) / "artifacts" / "advance-decisions.jsonl").exists()
+
+
+def test_advance_can_complete_default_task_graph(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Advance the whole default graph with safe server-side actions"},
+        )
+        run = create_response.json()
+
+        observed_actions: list[str] = []
+        for _ in range(5):
+            next_action_response = client.get(f"/api/runs/{run['id']}/next-action")
+            assert next_action_response.status_code == 200
+            observed_actions.append(next_action_response.json()["action"])
+
+            advance_response = client.post(f"/api/runs/{run['id']}/advance")
+            assert advance_response.status_code == 200
+            assert advance_response.json()["status"] == "completed"
+
+        detail_response = client.get(f"/api/runs/{run['id']}")
+        executions_response = client.get(f"/api/runs/{run['id']}/executions")
+        no_next_action_response = client.get(f"/api/runs/{run['id']}/next-action")
+        no_advance_response = client.post(f"/api/runs/{run['id']}/advance")
+
+    assert observed_actions == [
+        "inspect-workspace",
+        "read-intent",
+        "list-artifacts",
+        "list-root",
+        "list-artifacts",
+    ]
+
+    detail = detail_response.json()
+    assert detail["status"] == "completed"
+    assert all(task["status"] == "completed" for task in detail["tasks"])
+    assert any(
+        "Planner selected action 'inspect-workspace'" in event["message"]
+        for event in detail["events"]
+    )
+
+    artifact_path = Path(run["workspace_path"]) / "artifacts" / "advance-decisions.jsonl"
+    records = [json.loads(line) for line in artifact_path.read_text(encoding="utf-8").splitlines()]
+    assert len(records) == 6
+    assert records[0]["action"] == "inspect-workspace"
+    assert records[-1]["status"] == "blocked"
+
+    executions = executions_response.json()["items"]
+    assert len(executions) == 5
+    assert no_next_action_response.status_code == 409
+    assert no_advance_response.status_code == 409
+
+
 def test_blocked_execution_records_event_without_advancing_task(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         create_response = client.post(
@@ -150,3 +228,38 @@ def test_task_scoped_action_rules_are_enforced(tmp_path: Path) -> None:
         "Blocked execution action 'list-artifacts'" in event["message"]
         for event in detail["events"]
     )
+
+
+def test_ambiguous_next_action_state_fails_closed(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Refuse to advance when the run state is ambiguous"},
+        )
+        run = create_response.json()
+        settings = client.app.state.settings
+
+        with connect(settings) as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'ready'
+                WHERE id = ? AND run_id = ?
+                """,
+                (run["tasks"][1]["id"], run["id"]),
+            )
+
+        next_action_response = client.get(f"/api/runs/{run['id']}/next-action")
+        advance_response = client.post(f"/api/runs/{run['id']}/advance")
+        detail_response = client.get(f"/api/runs/{run['id']}")
+        executions_response = client.get(f"/api/runs/{run['id']}/executions")
+
+    assert next_action_response.status_code == 409
+    assert advance_response.status_code == 409
+    assert next_action_response.json()["detail"] == "No safe next action"
+    assert advance_response.json()["detail"] == "No safe next action"
+
+    detail = detail_response.json()
+    assert detail["tasks"][0]["status"] == "ready"
+    assert detail["tasks"][1]["status"] == "ready"
+    assert executions_response.json()["items"] == []

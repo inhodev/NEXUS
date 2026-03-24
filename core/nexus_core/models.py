@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-RunStatus = Literal["queued", "ready", "running", "failed", "completed"]
+RunStatus = Literal["queued", "ready", "running", "blocked", "failed", "completed"]
 TaskStatus = Literal["pending", "ready", "running", "blocked", "failed", "completed"]
 ExecutionStatus = Literal["running", "completed", "failed", "blocked"]
 
@@ -50,6 +50,17 @@ class ExecutionRecord(BaseModel):
     exit_code: int | None
     stdout_path: str
     stderr_path: str
+
+
+class NextActionRecord(BaseModel):
+    run_id: str
+    task_id: str
+    task_kind: str
+    task_title: str
+    action: str
+    command_argv: list[str]
+    available_actions: list[str] = Field(default_factory=list)
+    reason: str
 
 
 class ActionDescriptor(BaseModel):

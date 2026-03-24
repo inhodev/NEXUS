@@ -11,12 +11,14 @@ from .models import (
     CreateExecutionRequest,
     CreateRunRequest,
     ExecutionRecord,
+    NextActionRecord,
     RunDetail,
     RunSummary,
     SystemSummary,
 )
 from .service import (
     AGENT_ROLES,
+    advance_run,
     create_execution,
     create_run,
     get_execution,
@@ -25,6 +27,7 @@ from .service import (
     list_action_descriptors,
     list_executions,
     list_runs,
+    recommend_next_action,
 )
 
 
@@ -49,7 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "name": "NEXUS",
             "mode": "local-first",
-            "slice": "request-registration-and-run-tracking",
+            "slice": "bounded-planner-and-execution-loop",
         }
 
     @app.get("/healthz")
@@ -86,6 +89,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return get_run(app_settings, run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Run not found") from error
+
+    @app.get("/api/runs/{run_id}/next-action", response_model=NextActionRecord)
+    def next_action_endpoint(run_id: str) -> NextActionRecord:
+        try:
+            return recommend_next_action(app_settings, run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/runs/{run_id}/advance", response_model=ExecutionRecord)
+    def advance_run_endpoint(run_id: str) -> ExecutionRecord:
+        try:
+            return advance_run(app_settings, run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @app.post("/api/runs/{run_id}/executions", response_model=ExecutionRecord, status_code=201)
     def create_execution_endpoint(

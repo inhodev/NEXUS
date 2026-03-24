@@ -16,6 +16,7 @@ from .models import (
     CreateRunRequest,
     EventRecord,
     ExecutionRecord,
+    NextActionRecord,
     RunDetail,
     RunSummary,
     SystemSummary,
@@ -59,6 +60,14 @@ ACTION_CATALOG: dict[str, dict[str, object]] = {
         "description": "Read the run intent captured at registration time.",
         "task_kinds": {"intake", "planning", "architecture"},
     },
+}
+
+DEFAULT_ACTION_BY_TASK_KIND: dict[str, str] = {
+    "intake": "inspect-workspace",
+    "planning": "read-intent",
+    "architecture": "list-artifacts",
+    "implementation": "list-root",
+    "verification": "list-artifacts",
 }
 
 
@@ -193,6 +202,64 @@ def get_system_summary(settings: Settings) -> SystemSummary:
         run_count=len(runs),
         latest_run_id=latest,
         workspace_root=str(settings.workspace_root),
+    )
+
+
+def recommend_next_action(settings: Settings, run_id: str) -> NextActionRecord:
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        recommendation, _ = _resolve_next_action(connection, run_row)
+    if recommendation is None:
+        raise ValueError("No safe next action")
+    return recommendation
+
+
+def advance_run(settings: Settings, run_id: str) -> ExecutionRecord:
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        recommendation, problem = _resolve_next_action(connection, run_row)
+        created_at = utc_now()
+        workspace = Path(run_row["workspace_path"])
+
+        if recommendation is None:
+            warning = problem or "No safe next action"
+            _log_event(connection, run_id, "warning", warning, created_at)
+            _append_advance_record(
+                workspace,
+                {
+                    "created_at": created_at,
+                    "run_id": run_id,
+                    "status": "blocked",
+                    "detail": warning,
+                },
+            )
+            raise ValueError("No safe next action")
+
+        _log_event(
+            connection,
+            run_id,
+            "decision",
+            (
+                f"Planner selected action '{recommendation.action}' for task "
+                f"'{recommendation.task_id}' because {recommendation.reason}"
+            ),
+            created_at,
+        )
+        _append_advance_record(
+            workspace,
+            {
+                "created_at": created_at,
+                **recommendation.model_dump(),
+            },
+        )
+
+    return create_execution(
+        settings,
+        run_id,
+        CreateExecutionRequest(
+            task_id=recommendation.task_id,
+            action=recommendation.action,
+        ),
     )
 
 
@@ -431,6 +498,13 @@ def _write_initial_artifacts(
     )
 
 
+def _append_advance_record(workspace: Path, payload: dict[str, object]) -> None:
+    artifact_path = workspace / "artifacts" / "advance-decisions.jsonl"
+    with artifact_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload))
+        handle.write("\n")
+
+
 def _fetch_run_row(connection: sqlite3.Connection, run_id: str) -> sqlite3.Row:
     run_row = connection.execute(
         """
@@ -469,6 +543,74 @@ def _task_from_row(row: sqlite3.Row) -> TaskRecord:
     payload = dict(row)
     payload["available_actions"] = _available_actions_for_kind(str(row["kind"]))
     return TaskRecord(**payload)
+
+
+def _resolve_next_action(
+    connection: sqlite3.Connection,
+    run_row: sqlite3.Row,
+) -> tuple[NextActionRecord | None, str | None]:
+    run_id = str(run_row["id"])
+    task_rows = connection.execute(
+        """
+        SELECT id, kind, title, status, position, started_at, finished_at, last_error
+        FROM tasks
+        WHERE run_id = ?
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    ).fetchall()
+    statuses = [str(row["status"]) for row in task_rows]
+    ready_rows = [row for row in task_rows if row["status"] == "ready"]
+
+    if str(run_row["status"]) in {"failed", "completed"}:
+        return None, (
+            f"No safe next action for run '{run_id}' because the run status is "
+            f"'{run_row['status']}'."
+        )
+    if "failed" in statuses:
+        return None, f"No safe next action for run '{run_id}' because a task has failed."
+    if "running" in statuses:
+        return None, f"No safe next action for run '{run_id}' because a task is running."
+    if "blocked" in statuses:
+        return None, f"No safe next action for run '{run_id}' because a task is blocked."
+    if len(ready_rows) != 1:
+        return None, (
+            f"No safe next action for run '{run_id}' because there are {len(ready_rows)} "
+            "ready tasks."
+        )
+
+    task_row = ready_rows[0]
+    task_kind = str(task_row["kind"])
+    action = DEFAULT_ACTION_BY_TASK_KIND.get(task_kind)
+    if action is None:
+        return None, (
+            f"No safe next action for run '{run_id}' because task kind '{task_kind}' "
+            "has no default safe action."
+        )
+
+    available_actions = _available_actions_for_kind(task_kind)
+    if action not in available_actions:
+        return None, (
+            f"No safe next action for run '{run_id}' because action '{action}' is not "
+            f"available for task kind '{task_kind}'."
+        )
+
+    return (
+        NextActionRecord(
+            run_id=run_id,
+            task_id=str(task_row["id"]),
+            task_kind=task_kind,
+            task_title=str(task_row["title"]),
+            action=action,
+            command_argv=list(ACTION_CATALOG[action]["argv"]),
+            available_actions=available_actions,
+            reason=(
+                f"it is the default safe action for the only ready task kind "
+                f"'{task_kind}'."
+            ),
+        ),
+        None,
+    )
 
 
 def _advance_next_task(
@@ -519,6 +661,8 @@ def _update_run_status(connection: sqlite3.Connection, run_id: str) -> None:
         run_status = "completed"
     elif "failed" in statuses:
         run_status = "failed"
+    elif "blocked" in statuses:
+        run_status = "blocked"
     elif "running" in statuses:
         run_status = "running"
     else:
