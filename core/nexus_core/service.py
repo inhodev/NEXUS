@@ -80,6 +80,7 @@ DEFAULT_ACTION_BY_TASK_KIND: dict[str, str] = {
 RECOVERY_ARTIFACT_NAME = "run-recovery.json"
 RECOVERY_ACTIONS_ARTIFACT_NAME = "recovery-actions.jsonl"
 DISPATCHES_ARTIFACT_NAME = "dispatches.jsonl"
+DISPATCH_CLAIMS_DIR_NAME = "dispatch-claims"
 
 DEFAULT_AGENT_ROLE_BY_TASK_KIND: dict[str, str] = {
     "intake": "planner",
@@ -250,7 +251,7 @@ def create_dispatch(settings: Settings, run_id: str) -> DispatchRecord:
             raise ValueError("No safe dispatch target")
 
         workspace = Path(run_row["workspace_path"])
-        existing_dispatch, superseded_count = _reconcile_prepared_dispatches(
+        existing_dispatch, superseded_count = _reconcile_active_dispatches(
             connection,
             workspace,
             run_id,
@@ -263,12 +264,12 @@ def create_dispatch(settings: Settings, run_id: str) -> DispatchRecord:
                 _log_event(
                     connection,
                     run_id,
-                    "decision",
-                    (
-                        f"Superseded {superseded_count} stale prepared dispatch record(s) "
-                        f"before reusing dispatch '{existing_dispatch.id}'."
-                    ),
-                    created_at,
+                        "decision",
+                        (
+                            f"Superseded {superseded_count} stale active dispatch record(s) "
+                            f"before reusing dispatch '{existing_dispatch.id}'."
+                        ),
+                        created_at,
                 )
                 _write_recovery_snapshot(
                     workspace,
@@ -288,9 +289,10 @@ def create_dispatch(settings: Settings, run_id: str) -> DispatchRecord:
             INSERT INTO dispatches (
                 id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
                 worktree_name, worktree_path, repo_root, base_commit, prompt_path,
-                startup_commands_json, status, status_detail, created_at, updated_at
+                startup_commands_json, claim_command_argv_json, claim_stdout_path,
+                claim_stderr_path, claimed_at, status, status_detail, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 dispatch.id,
@@ -306,6 +308,10 @@ def create_dispatch(settings: Settings, run_id: str) -> DispatchRecord:
                 dispatch.base_commit,
                 dispatch.prompt_path,
                 json.dumps(dispatch.startup_commands),
+                None,
+                dispatch.claim_stdout_path,
+                dispatch.claim_stderr_path,
+                dispatch.claimed_at,
                 dispatch.status,
                 dispatch.status_detail,
                 dispatch.created_at,
@@ -325,7 +331,7 @@ def create_dispatch(settings: Settings, run_id: str) -> DispatchRecord:
                 run_id,
                 "decision",
                 (
-                    f"Superseded {superseded_count} stale prepared dispatch record(s) "
+                    f"Superseded {superseded_count} stale active dispatch record(s) "
                     "before preparing a new pinned dispatch."
                 ),
                 created_at,
@@ -355,7 +361,8 @@ def list_dispatches(settings: Settings, run_id: str) -> list[DispatchRecord]:
             """
             SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
                    worktree_name, worktree_path, repo_root, base_commit, prompt_path,
-                   startup_commands_json, status, status_detail, created_at, updated_at
+                   startup_commands_json, claim_command_argv_json, claim_stdout_path,
+                   claim_stderr_path, claimed_at, status, status_detail, created_at, updated_at
             FROM dispatches
             WHERE run_id = ?
             ORDER BY created_at ASC, id ASC
@@ -363,6 +370,88 @@ def list_dispatches(settings: Settings, run_id: str) -> list[DispatchRecord]:
             (run_id,),
         ).fetchall()
     return [_dispatch_from_row(row) for row in rows]
+
+
+def claim_dispatch(settings: Settings, run_id: str, dispatch_id: str) -> DispatchRecord:
+    started_at = utc_now()
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        workspace = Path(run_row["workspace_path"])
+        dispatch = _fetch_dispatch_row(connection, run_id, dispatch_id)
+
+        if dispatch.status == "claimed":
+            return dispatch
+        if dispatch.status not in {"prepared", "claim_failed"}:
+            raise ValueError("Dispatch is not claimable in its current state")
+
+        recommendation, _ = _resolve_next_action(connection, run_row)
+        if recommendation is None or recommendation.task_id != dispatch.task_id:
+            invalidated = _update_dispatch_status(
+                connection,
+                dispatch,
+                status="invalidated",
+                detail="Dispatch is no longer the current safe task and cannot be claimed.",
+                updated_at=started_at,
+            )
+            _append_dispatch_record(workspace, invalidated)
+            _log_event(
+                connection,
+                run_id,
+                "warning",
+                (
+                    f"Invalidated dispatch '{dispatch.id}' because it is no longer the "
+                    "current safe task."
+                ),
+                started_at,
+            )
+            _write_recovery_snapshot(
+                workspace,
+                _build_recovery_snapshot(connection, _fetch_run_row(connection, run_id)),
+            )
+            raise ValueError("Dispatch is no longer safe to claim")
+
+    command_argv = _dispatch_claim_command(settings, dispatch)
+    completed = _materialize_dispatch_worktree(settings, dispatch, command_argv)
+    stdout_path, stderr_path = _dispatch_claim_log_paths(workspace, dispatch.id)
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_text(completed.stdout, encoding="utf-8")
+    stderr_path.write_text(completed.stderr, encoding="utf-8")
+    finished_at = utc_now()
+
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        workspace = Path(run_row["workspace_path"])
+        current_dispatch = _fetch_dispatch_row(connection, run_id, dispatch_id)
+        if current_dispatch.status == "claimed":
+            return current_dispatch
+        if current_dispatch.status not in {"prepared", "claim_failed"}:
+            raise ValueError("Dispatch changed state before the claim could be recorded")
+
+        updated_dispatch = _record_dispatch_claim_result(
+            connection,
+            current_dispatch,
+            command_argv=command_argv,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            completed=completed,
+            finished_at=finished_at,
+        )
+        _append_dispatch_record(workspace, updated_dispatch)
+        _log_event(
+            connection,
+            run_id,
+            "decision" if completed.returncode == 0 else "warning",
+            _dispatch_claim_event_message(updated_dispatch),
+            finished_at,
+        )
+        _write_recovery_snapshot(
+            workspace,
+            _build_recovery_snapshot(connection, _fetch_run_row(connection, run_id)),
+        )
+
+    if updated_dispatch.status != "claimed":
+        raise ValueError("Dispatch claim failed")
+    return updated_dispatch
 
 
 def recover_run(
@@ -387,7 +476,7 @@ def recover_run(
             request,
             created_at,
         )
-        invalidated_dispatches = _invalidate_prepared_dispatches(
+        invalidated_dispatches = _invalidate_active_dispatches(
             connection,
             workspace,
             run_id,
@@ -400,7 +489,7 @@ def recover_run(
                 run_id,
                 "decision",
                 (
-                    f"Invalidated {len(invalidated_dispatches)} prepared dispatch record(s) "
+                    f"Invalidated {len(invalidated_dispatches)} active dispatch record(s) "
                     "after recovery changed task state."
                 ),
                 created_at,
@@ -524,6 +613,24 @@ def create_execution(
             _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
             connection.commit()
             raise ValueError("Task is already running")
+        claimed_dispatch = _active_claimed_dispatch_for_task(
+            connection,
+            run_id,
+            str(task_row["id"]),
+        )
+        if claimed_dispatch is not None:
+            _block_execution_action(
+                connection,
+                run_id,
+                (
+                    f"Blocked execution action '{request.action}' because dispatch "
+                    f"'{claimed_dispatch.id}' already claimed task '{task_row['title']}'."
+                ),
+                start_time,
+            )
+            _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
+            connection.commit()
+            raise ValueError("Task is owned by a claimed dispatch")
         if task_row["status"] != "ready":
             _block_execution_action(
                 connection,
@@ -688,7 +795,7 @@ def create_execution(
                 f"Task execution failed for '{request.action}'.",
                 finish_time,
             )
-        invalidated_dispatches = _invalidate_prepared_dispatches(
+        invalidated_dispatches = _invalidate_active_dispatches(
             connection,
             workspace,
             run_id,
@@ -701,7 +808,7 @@ def create_execution(
                 run_id,
                 "decision",
                 (
-                    f"Invalidated {len(invalidated_dispatches)} prepared dispatch record(s) "
+                    f"Invalidated {len(invalidated_dispatches)} active dispatch record(s) "
                     "after execution changed task state."
                 ),
                 finish_time,
@@ -895,6 +1002,10 @@ def _build_dispatch_record(
             f"make worktree NAME={worktree_name} BASE_REF={base_commit}",
             f"cd .worktrees/{worktree_name}",
         ],
+        claim_command_argv=[],
+        claim_stdout_path=None,
+        claim_stderr_path=None,
+        claimed_at=None,
         status="prepared",
         status_detail="Prepared for the current safe task and pinned to a git commit.",
         created_at=created_at,
@@ -949,7 +1060,7 @@ def _write_dispatch_prompt(
     )
 
 
-def _reconcile_prepared_dispatches(
+def _reconcile_active_dispatches(
     connection: sqlite3.Connection,
     workspace: Path,
     run_id: str,
@@ -962,9 +1073,10 @@ def _reconcile_prepared_dispatches(
         """
         SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
                worktree_name, worktree_path, repo_root, base_commit, prompt_path,
-               startup_commands_json, status, status_detail, created_at, updated_at
+               startup_commands_json, claim_command_argv_json, claim_stdout_path,
+               claim_stderr_path, claimed_at, status, status_detail, created_at, updated_at
         FROM dispatches
-        WHERE run_id = ? AND status = 'prepared'
+        WHERE run_id = ? AND status IN ('prepared', 'claimed', 'claim_failed')
         ORDER BY created_at DESC, id DESC
         """,
         (run_id,),
@@ -995,7 +1107,7 @@ def _reconcile_prepared_dispatches(
     return active_dispatch, superseded_count
 
 
-def _invalidate_prepared_dispatches(
+def _invalidate_active_dispatches(
     connection: sqlite3.Connection,
     workspace: Path,
     run_id: str,
@@ -1007,9 +1119,10 @@ def _invalidate_prepared_dispatches(
         """
         SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
                worktree_name, worktree_path, repo_root, base_commit, prompt_path,
-               startup_commands_json, status, status_detail, created_at, updated_at
+               startup_commands_json, claim_command_argv_json, claim_stdout_path,
+               claim_stderr_path, claimed_at, status, status_detail, created_at, updated_at
         FROM dispatches
-        WHERE run_id = ? AND status = 'prepared'
+        WHERE run_id = ? AND status IN ('prepared', 'claimed', 'claim_failed')
         ORDER BY created_at ASC, id ASC
         """,
         (run_id,),
@@ -1056,6 +1169,117 @@ def _update_dispatch_status(
     return updated_dispatch
 
 
+def _dispatch_claim_command(settings: Settings, dispatch: DispatchRecord) -> list[str]:
+    return [
+        "zsh",
+        str(settings.repo_root / ".codex" / "setup" / "create-worktree.sh"),
+        dispatch.worktree_name,
+        dispatch.base_commit,
+    ]
+
+
+def _dispatch_claim_log_paths(workspace: Path, dispatch_id: str) -> tuple[Path, Path]:
+    claim_dir = workspace / "artifacts" / DISPATCH_CLAIMS_DIR_NAME / dispatch_id
+    return claim_dir / "stdout.txt", claim_dir / "stderr.txt"
+
+
+def _materialize_dispatch_worktree(
+    settings: Settings,
+    dispatch: DispatchRecord,
+    command_argv: list[str],
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["LC_ALL"] = "C.UTF-8"
+    try:
+        return subprocess.run(
+            command_argv,
+            cwd=settings.repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout or ""
+        stderr = (error.stderr or "") + "\nDispatch claim timed out after 120 seconds."
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=124,
+            stdout=stdout,
+            stderr=stderr.strip(),
+        )
+    except OSError as error:
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=127,
+            stdout="",
+            stderr=f"{error.__class__.__name__}: {error}",
+        )
+
+
+def _record_dispatch_claim_result(
+    connection: sqlite3.Connection,
+    dispatch: DispatchRecord,
+    *,
+    command_argv: list[str],
+    stdout_path: Path,
+    stderr_path: Path,
+    completed: subprocess.CompletedProcess[str],
+    finished_at: str,
+) -> DispatchRecord:
+    status = "claimed" if completed.returncode == 0 else "claim_failed"
+    detail = (
+        f"Worktree claimed at {dispatch.worktree_path}."
+        if completed.returncode == 0
+        else _last_error_message(completed.stderr) or "Dispatch claim failed."
+    )
+    update_payload = {
+        "claim_command_argv": command_argv,
+        "claim_stdout_path": str(stdout_path),
+        "claim_stderr_path": str(stderr_path),
+        "claimed_at": finished_at if completed.returncode == 0 else None,
+        "status": status,
+        "status_detail": detail,
+        "updated_at": finished_at,
+    }
+    updated_dispatch = dispatch.model_copy(update=update_payload)
+    connection.execute(
+        """
+        UPDATE dispatches
+        SET claim_command_argv_json = ?,
+            claim_stdout_path = ?,
+            claim_stderr_path = ?,
+            claimed_at = ?,
+            status = ?,
+            status_detail = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            json.dumps(command_argv),
+            str(stdout_path),
+            str(stderr_path),
+            update_payload["claimed_at"],
+            status,
+            detail,
+            finished_at,
+            dispatch.id,
+        ),
+    )
+    return updated_dispatch
+
+
+def _dispatch_claim_event_message(dispatch: DispatchRecord) -> str:
+    if dispatch.status == "claimed":
+        return (
+            f"Claimed dispatch '{dispatch.id}' into worktree '{dispatch.worktree_path}'."
+        )
+    return (
+        f"Dispatch '{dispatch.id}' claim failed. Inspect {dispatch.claim_stderr_path}."
+    )
+
+
 def _fetch_run_row(connection: sqlite3.Connection, run_id: str) -> sqlite3.Row:
     run_row = connection.execute(
         """
@@ -1086,6 +1310,27 @@ def _fetch_task_row(
     if task_row is None:
         raise KeyError(task_id)
     return task_row
+
+
+def _fetch_dispatch_row(
+    connection: sqlite3.Connection,
+    run_id: str,
+    dispatch_id: str,
+) -> DispatchRecord:
+    row = connection.execute(
+        """
+        SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
+               worktree_name, worktree_path, repo_root, base_commit, prompt_path,
+               startup_commands_json, claim_command_argv_json, claim_stdout_path,
+               claim_stderr_path, claimed_at, status, status_detail, created_at, updated_at
+        FROM dispatches
+        WHERE run_id = ? AND id = ?
+        """,
+        (run_id, dispatch_id),
+    ).fetchone()
+    if row is None:
+        raise KeyError(dispatch_id)
+    return _dispatch_from_row(row)
 
 
 def _fetch_task_rows(connection: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
@@ -1154,6 +1399,16 @@ def _resolve_next_action(
         return None, (
             f"No safe next action for run '{run_id}' because action '{action}' is not "
             f"available for task kind '{task_kind}'."
+        )
+    claimed_dispatch = _active_claimed_dispatch_for_task(
+        connection,
+        run_id,
+        str(task_row["id"]),
+    )
+    if claimed_dispatch is not None:
+        return None, (
+            f"No safe next action for run '{run_id}' because dispatch "
+            f"'{claimed_dispatch.id}' already claimed task '{task_row['title']}'."
         )
 
     return (
@@ -1399,13 +1654,37 @@ def _fetch_latest_dispatch(
         """
         SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
                worktree_name, worktree_path, repo_root, base_commit, prompt_path,
-               startup_commands_json, status, status_detail, created_at, updated_at
+               startup_commands_json, claim_command_argv_json, claim_stdout_path,
+               claim_stderr_path, claimed_at, status, status_detail, created_at, updated_at
         FROM dispatches
         WHERE run_id = ?
         ORDER BY updated_at DESC, created_at DESC, id DESC
         LIMIT 1
         """,
         (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _dispatch_from_row(row)
+
+
+def _active_claimed_dispatch_for_task(
+    connection: sqlite3.Connection,
+    run_id: str,
+    task_id: str,
+) -> DispatchRecord | None:
+    row = connection.execute(
+        """
+        SELECT id, run_id, task_id, task_kind, task_title, agent_role, branch_name,
+               worktree_name, worktree_path, repo_root, base_commit, prompt_path,
+               startup_commands_json, claim_command_argv_json, claim_stdout_path,
+               claim_stderr_path, claimed_at, status, status_detail, created_at, updated_at
+        FROM dispatches
+        WHERE run_id = ? AND task_id = ? AND status = 'claimed'
+        ORDER BY updated_at DESC, created_at DESC, id DESC
+        LIMIT 1
+        """,
+        (run_id, task_id),
     ).fetchone()
     if row is None:
         return None
@@ -1479,6 +1758,34 @@ def _recovery_guidance(
                 f"Inspect {latest_dispatch.prompt_path} or GET /api/runs/{run_id}/dispatches "
                 "before preparing another handoff."
             )
+        elif (
+            latest_dispatch is not None
+            and latest_dispatch.status == "claimed"
+            and latest_dispatch.task_id == current_task.id
+        ):
+            summary += " A claimed worktree already exists for this task."
+            restart_hints.append(
+                f"Inspect {latest_dispatch.worktree_path} and continue from that worktree."
+            )
+            if latest_dispatch.claim_stderr_path and latest_dispatch.claim_stdout_path:
+                restart_hints.append(
+                    f"Review {latest_dispatch.claim_stderr_path} and "
+                    f"{latest_dispatch.claim_stdout_path} for the claim logs."
+                )
+        elif (
+            latest_dispatch is not None
+            and latest_dispatch.status == "claim_failed"
+            and latest_dispatch.task_id == current_task.id
+        ):
+            summary += " The latest dispatch claim failed, but the task is still ready."
+            if latest_dispatch.claim_stderr_path:
+                restart_hints.append(
+                    f"Inspect {latest_dispatch.claim_stderr_path} before retrying the claim."
+                )
+            restart_hints.append(
+                f"Call POST /api/runs/{run_id}/dispatches/{latest_dispatch.id}/claim to retry "
+                "the same pinned handoff."
+            )
         else:
             restart_hints.append(
                 f"Call POST /api/runs/{run_id}/dispatches to prepare a pinned worktree handoff."
@@ -1487,6 +1794,35 @@ def _recovery_guidance(
             "ready",
             summary,
             None,
+            restart_hints,
+        )
+
+    if (
+        latest_dispatch is not None
+        and latest_dispatch.status == "claimed"
+        and current_task is not None
+        and latest_dispatch.task_id == current_task.id
+    ):
+        restart_hints = [
+            f"Inspect {latest_dispatch.worktree_path} for the active claimed worktree.",
+            (
+                f"Review {latest_dispatch.claim_stderr_path} and "
+                f"{latest_dispatch.claim_stdout_path} for the latest claim logs."
+            )
+            if latest_dispatch.claim_stderr_path and latest_dispatch.claim_stdout_path
+            else "Review the latest dispatch record before attempting another claim.",
+            (
+                f"Inspect GET /api/runs/{run_id}/dispatches to avoid launching a second owner "
+                "for this task."
+            ),
+        ]
+        return (
+            "running",
+            (
+                f"Dispatch '{latest_dispatch.id}' owns task '{current_task.title}' in "
+                "a claimed worktree."
+            ),
+            problem,
             restart_hints,
         )
 
@@ -1644,6 +1980,7 @@ def _dispatch_from_row(row: sqlite3.Row) -> DispatchRecord:
     payload = dict(row)
     base_commit = payload.get("base_commit") or "HEAD"
     startup_commands_json = payload.pop("startup_commands_json", None)
+    claim_command_argv_json = payload.pop("claim_command_argv_json", None)
     if startup_commands_json:
         payload["startup_commands"] = json.loads(startup_commands_json)
     else:
@@ -1651,6 +1988,10 @@ def _dispatch_from_row(row: sqlite3.Row) -> DispatchRecord:
             f"make worktree NAME={payload['worktree_name']} BASE_REF={base_commit}",
             f"cd .worktrees/{payload['worktree_name']}",
         ]
+    if claim_command_argv_json:
+        payload["claim_command_argv"] = json.loads(claim_command_argv_json)
+    else:
+        payload["claim_command_argv"] = []
     payload["repo_root"] = payload.get("repo_root") or ""
     payload["base_commit"] = base_commit
     payload["updated_at"] = payload.get("updated_at") or payload["created_at"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -252,6 +253,143 @@ def test_dispatch_reuses_existing_prepared_work_order(tmp_path: Path) -> None:
     assert records[0]["id"] == first_dispatch["id"]
 
 
+def test_claim_dispatch_materializes_worktree_and_logs(tmp_path: Path, monkeypatch) -> None:
+    from nexus_core import service as service_module
+
+    def fake_materialize(settings, dispatch, command_argv):
+        Path(dispatch.worktree_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=0,
+            stdout="worktree ready\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(service_module, "_materialize_dispatch_worktree", fake_materialize)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Claim the prepared dispatch into a real worktree lifecycle"},
+        )
+        run = create_response.json()
+
+        dispatch_response = client.post(f"/api/runs/{run['id']}/dispatches")
+        dispatch = dispatch_response.json()
+        claim_response = client.post(
+            f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim"
+        )
+        second_claim_response = client.post(
+            f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim"
+        )
+        next_action_response = client.get(f"/api/runs/{run['id']}/next-action")
+        advance_response = client.post(f"/api/runs/{run['id']}/advance")
+        execution_response = client.post(
+            f"/api/runs/{run['id']}/executions",
+            json={"task_id": dispatch["task_id"], "action": "inspect-workspace"},
+        )
+        dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+
+    assert claim_response.status_code == 200
+    assert second_claim_response.status_code == 200
+    assert next_action_response.status_code == 409
+    assert advance_response.status_code == 409
+    assert execution_response.status_code == 400
+    claimed = claim_response.json()
+    assert second_claim_response.json()["id"] == claimed["id"]
+    assert claimed["id"] == dispatch["id"]
+    assert claimed["status"] == "claimed"
+    assert claimed["claimed_at"] is not None
+    assert claimed["claim_command_argv"][0] == "zsh"
+    assert Path(claimed["worktree_path"]).exists()
+    assert Path(claimed["claim_stdout_path"]).read_text(encoding="utf-8") == "worktree ready\n"
+    assert Path(claimed["claim_stderr_path"]).read_text(encoding="utf-8") == ""
+
+    dispatches = dispatches_response.json()
+    assert dispatches[0]["status"] == "claimed"
+    assert dispatches[0]["claim_command_argv"] == claimed["claim_command_argv"]
+
+    recovery = recovery_response.json()
+    assert recovery["latest_dispatch"]["id"] == claimed["id"]
+    assert recovery["latest_dispatch"]["status"] == "claimed"
+    assert recovery["recovery_status"] == "running"
+    assert recovery["can_advance"] is False
+    assert "owns task" in recovery["summary"]
+
+    dispatch_log = Path(run["workspace_path"]) / "artifacts" / "dispatches.jsonl"
+    records = [json.loads(line) for line in dispatch_log.read_text(encoding="utf-8").splitlines()]
+    assert [record["status"] for record in records] == ["prepared", "claimed"]
+
+
+def test_claim_failed_dispatch_can_retry_same_handoff(tmp_path: Path, monkeypatch) -> None:
+    from nexus_core import service as service_module
+
+    attempts = {"count": 0}
+
+    def flaky_materialize(settings, dispatch, command_argv):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return subprocess.CompletedProcess(
+                args=command_argv,
+                returncode=1,
+                stdout="",
+                stderr="branch already exists\n",
+            )
+        Path(dispatch.worktree_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=0,
+            stdout="claimed on retry\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(service_module, "_materialize_dispatch_worktree", flaky_materialize)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Retry the same pinned handoff after a failed claim"},
+        )
+        run = create_response.json()
+        dispatch = client.post(f"/api/runs/{run['id']}/dispatches").json()
+
+        first_claim_response = client.post(
+            f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim"
+        )
+        dispatches_after_failure = client.get(f"/api/runs/{run['id']}/dispatches")
+        recovery_after_failure = client.get(f"/api/runs/{run['id']}/recovery")
+
+        retry_claim_response = client.post(
+            f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim"
+        )
+        dispatches_after_retry = client.get(f"/api/runs/{run['id']}/dispatches")
+
+    assert first_claim_response.status_code == 409
+    failed_dispatch = dispatches_after_failure.json()[0]
+    assert failed_dispatch["status"] == "claim_failed"
+    assert "branch already exists" in failed_dispatch["status_detail"]
+    assert Path(failed_dispatch["claim_stderr_path"]).exists()
+
+    recovery = recovery_after_failure.json()
+    assert recovery["can_advance"] is True
+    assert recovery["latest_dispatch"]["status"] == "claim_failed"
+    assert "claim failed" in recovery["summary"]
+    assert any("retry the same pinned handoff" in hint for hint in recovery["restart_hints"])
+
+    assert retry_claim_response.status_code == 200
+    claimed_dispatch = retry_claim_response.json()
+    assert claimed_dispatch["status"] == "claimed"
+    assert Path(claimed_dispatch["worktree_path"]).exists()
+
+    dispatches = dispatches_after_retry.json()
+    assert dispatches[0]["status"] == "claimed"
+
+    dispatch_log = Path(run["workspace_path"]) / "artifacts" / "dispatches.jsonl"
+    records = [json.loads(line) for line in dispatch_log.read_text(encoding="utf-8").splitlines()]
+    assert [record["status"] for record in records] == ["prepared", "claim_failed", "claimed"]
+
+
 def test_execution_invalidates_prepared_dispatch(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         create_response = client.post(
@@ -286,9 +424,74 @@ def test_execution_invalidates_prepared_dispatch(tmp_path: Path) -> None:
 
     detail = detail_response.json()
     assert any(
-        "Invalidated 1 prepared dispatch record" in event["message"]
+        "Invalidated 1 active dispatch record" in event["message"]
         for event in detail["events"]
     )
+
+
+def test_recovery_invalidates_claimed_dispatch(tmp_path: Path, monkeypatch) -> None:
+    from nexus_core import service as service_module
+
+    def fake_materialize(settings, dispatch, command_argv):
+        Path(dispatch.worktree_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=0,
+            stdout="claimed\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(service_module, "_materialize_dispatch_worktree", fake_materialize)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Invalidate claimed dispatches when recovery changes the task graph"},
+        )
+        run = create_response.json()
+        settings = client.app.state.settings
+        dispatch = client.post(f"/api/runs/{run['id']}/dispatches").json()
+        claim_response = client.post(f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim")
+        assert claim_response.status_code == 200
+
+        with connect(settings) as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'blocked',
+                    last_error = 'Manual review is required before continuing'
+                WHERE id = ? AND run_id = ?
+                """,
+                (dispatch["task_id"], run["id"]),
+            )
+            connection.execute(
+                """
+                UPDATE runs
+                SET status = 'blocked'
+                WHERE id = ?
+                """,
+                (run["id"],),
+            )
+
+        recover_response = client.post(
+            f"/api/runs/{run['id']}/recover",
+            json={"action": "requeue-task", "task_id": dispatch["task_id"]},
+        )
+        dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+
+    assert recover_response.status_code == 200
+    dispatches = dispatches_response.json()
+    assert dispatches[0]["status"] == "invalidated"
+    assert dispatches[0]["claim_stdout_path"] is not None
+    assert dispatches[0]["claimed_at"] is not None
+
+    recovery = recovery_response.json()
+    assert recovery["latest_dispatch"]["status"] == "invalidated"
+
+    dispatch_log = Path(run["workspace_path"]) / "artifacts" / "dispatches.jsonl"
+    records = [json.loads(line) for line in dispatch_log.read_text(encoding="utf-8").splitlines()]
+    assert [record["status"] for record in records] == ["prepared", "claimed", "invalidated"]
 
 
 def test_next_action_endpoint_is_read_only(tmp_path: Path) -> None:

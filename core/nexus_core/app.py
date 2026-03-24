@@ -23,6 +23,7 @@ from .models import (
 from .service import (
     AGENT_ROLES,
     advance_run,
+    claim_dispatch,
     create_dispatch,
     create_execution,
     create_run,
@@ -118,6 +119,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return create_dispatch(app_settings, run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Run not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post("/api/runs/{run_id}/dispatches/{dispatch_id}/claim", response_model=DispatchRecord)
+    def claim_dispatch_endpoint(run_id: str, dispatch_id: str) -> DispatchRecord:
+        try:
+            return claim_dispatch(app_settings, run_id, dispatch_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or dispatch not found") from error
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 

@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS dispatches (
     base_commit TEXT NOT NULL,
     prompt_path TEXT NOT NULL,
     startup_commands_json TEXT NOT NULL,
+    claim_command_argv_json TEXT,
+    claim_stdout_path TEXT,
+    claim_stderr_path TEXT,
+    claimed_at TEXT,
     status TEXT NOT NULL,
     status_detail TEXT,
     created_at TEXT NOT NULL,
@@ -84,6 +88,10 @@ def initialize_database(settings: Settings) -> None:
         _ensure_column(connection, "dispatches", "repo_root", "TEXT")
         _ensure_column(connection, "dispatches", "base_commit", "TEXT")
         _ensure_column(connection, "dispatches", "startup_commands_json", "TEXT")
+        _ensure_column(connection, "dispatches", "claim_command_argv_json", "TEXT")
+        _ensure_column(connection, "dispatches", "claim_stdout_path", "TEXT")
+        _ensure_column(connection, "dispatches", "claim_stderr_path", "TEXT")
+        _ensure_column(connection, "dispatches", "claimed_at", "TEXT")
         _ensure_column(connection, "dispatches", "status_detail", "TEXT")
         _ensure_column(connection, "dispatches", "updated_at", "TEXT")
 

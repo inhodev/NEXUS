@@ -8,7 +8,7 @@ RunStatus = Literal["queued", "ready", "running", "blocked", "failed", "complete
 TaskStatus = Literal["pending", "ready", "running", "blocked", "failed", "completed"]
 ExecutionStatus = Literal["running", "completed", "failed", "blocked"]
 RecoveryStatus = Literal["ready", "running", "attention_required", "completed"]
-DispatchStatus = Literal["prepared", "superseded", "invalidated"]
+DispatchStatus = Literal["prepared", "claimed", "claim_failed", "superseded", "invalidated"]
 
 
 class CreateRunRequest(BaseModel):
@@ -132,6 +132,10 @@ class DispatchRecord(BaseModel):
     base_commit: str
     prompt_path: str
     startup_commands: list[str] = Field(default_factory=list)
+    claim_command_argv: list[str] = Field(default_factory=list)
+    claim_stdout_path: str | None = None
+    claim_stderr_path: str | None = None
+    claimed_at: str | None = None
     status: DispatchStatus
     status_detail: str | None = None
     created_at: str
