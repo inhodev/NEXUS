@@ -12,6 +12,7 @@ from .models import (
     CreateRunRequest,
     ExecutionRecord,
     NextActionRecord,
+    RecoverySnapshot,
     RunDetail,
     RunSummary,
     SystemSummary,
@@ -22,6 +23,7 @@ from .service import (
     create_execution,
     create_run,
     get_execution,
+    get_recovery_snapshot,
     get_run,
     get_system_summary,
     list_action_descriptors,
@@ -87,6 +89,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def run_detail(run_id: str) -> RunDetail:
         try:
             return get_run(app_settings, run_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run not found") from error
+
+    @app.get("/api/runs/{run_id}/recovery", response_model=RecoverySnapshot)
+    def recovery_endpoint(run_id: str) -> RecoverySnapshot:
+        try:
+            return get_recovery_snapshot(app_settings, run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Run not found") from error
 

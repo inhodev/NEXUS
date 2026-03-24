@@ -16,8 +16,11 @@ def request_json(url: str, payload: dict[str, str] | None = None) -> tuple[int, 
         method = "POST"
 
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
-        return response.status, json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read().decode("utf-8"))
 
 
 def main() -> int:
@@ -38,6 +41,11 @@ def main() -> int:
         )
         assert status == 201
 
+        status, recovery = request_json(f"{args.base_url}/api/runs/{run['id']}/recovery")
+        assert status == 200
+        assert recovery["run_status"] == "ready"
+        assert recovery["can_advance"] is True
+
         status, next_action = request_json(f"{args.base_url}/api/runs/{run['id']}/next-action")
         assert status == 200
         assert next_action["task_id"] == run["tasks"][0]["id"]
@@ -52,6 +60,20 @@ def main() -> int:
         assert status == 200
         assert refreshed_run["tasks"][0]["status"] == "completed"
         assert refreshed_run["tasks"][1]["status"] == "ready"
+
+        status, refreshed_recovery = request_json(f"{args.base_url}/api/runs/{run['id']}/recovery")
+        assert status == 200
+        assert refreshed_recovery["recovery_status"] == "ready"
+        assert refreshed_recovery["next_action"]["action"] == "read-intent"
+
+        for _ in range(4):
+            status, execution = request_json(f"{args.base_url}/api/runs/{run['id']}/advance", {})
+            assert status == 200
+            assert execution["status"] == "completed"
+
+        status, blocked_advance = request_json(f"{args.base_url}/api/runs/{run['id']}/advance", {})
+        assert status == 409
+        assert blocked_advance["detail"] == "No safe next action"
 
         status, summary = request_json(f"{args.base_url}/api/system/summary")
         assert status == 200

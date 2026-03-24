@@ -44,6 +44,7 @@ Expected first-slice behavior:
 - run and task state can be queried
 - each task exposes a small allowed action set
 - the next safe action can be previewed without mutating the run
+- the run exposes a recovery snapshot with blocking reasons and restart hints
 - the planner can advance the run with a bounded workspace action
 - artifacts and logs stay local
 
@@ -55,10 +56,19 @@ curl -s http://127.0.0.1:8000/api/actions
 curl -s -X POST http://127.0.0.1:8000/api/runs -H 'content-type: application/json' -d '{"intent":"Build a task manager with audit logs"}'
 curl -s http://127.0.0.1:8000/api/runs
 curl -s http://127.0.0.1:8000/api/system/summary
+curl -s http://127.0.0.1:8000/api/runs/<run-id>/recovery
 curl -s http://127.0.0.1:8000/api/runs/<run-id>/next-action
 curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/advance
 curl -s http://127.0.0.1:8000/api/runs/<run-id>/executions
 ```
+
+If `next-action` or `advance` returns `409`, inspect these in order:
+
+- `GET /api/runs/<run-id>/recovery` for the latest blocking reason and restart hints
+- `GET /api/runs/<run-id>` for task statuses and recent events
+- `artifacts/advance-decisions.jsonl` for append-only planner history
+- `artifacts/run-recovery.json` for the latest resumable snapshot
+- `executions/<id>/stdout.txt` and `executions/<id>/stderr.txt` if the latest execution failed
 
 ## Dependency Strategy
 

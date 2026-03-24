@@ -132,6 +132,31 @@ def test_execution_requires_task_scope(tmp_path: Path) -> None:
     assert executions_response.json()["items"] == []
 
 
+def test_recovery_snapshot_for_ready_run(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Expose a resumable snapshot for the ready run state"},
+        )
+        run = create_response.json()
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+
+    assert recovery_response.status_code == 200
+    snapshot = recovery_response.json()
+    assert snapshot["run_status"] == "ready"
+    assert snapshot["recovery_status"] == "ready"
+    assert snapshot["can_advance"] is True
+    assert snapshot["current_task"]["id"] == run["tasks"][0]["id"]
+    assert snapshot["next_action"]["action"] == "inspect-workspace"
+    assert snapshot["latest_decision"] is None
+    assert "POST /api/runs/" in snapshot["restart_hints"][0]
+
+    artifact_path = Path(snapshot["artifact_paths"]["recovery_snapshot"])
+    assert artifact_path.exists()
+    artifact_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact_payload["next_action"]["action"] == "inspect-workspace"
+
+
 def test_next_action_endpoint_is_read_only(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         create_response = client.post(
@@ -155,6 +180,52 @@ def test_next_action_endpoint_is_read_only(tmp_path: Path) -> None:
     assert detail["tasks"][0]["status"] == "ready"
     assert not any("Planner selected action" in event["message"] for event in detail["events"])
     assert not (Path(run["workspace_path"]) / "artifacts" / "advance-decisions.jsonl").exists()
+
+
+def test_failed_execution_surfaces_recovery_snapshot(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Surface failed execution recovery hints"},
+        )
+        run = create_response.json()
+
+        first_advance_response = client.post(f"/api/runs/{run['id']}/advance")
+        assert first_advance_response.status_code == 200
+
+        workspace = Path(run["workspace_path"])
+        (workspace / "intent.md").unlink()
+
+        failed_advance_response = client.post(f"/api/runs/{run['id']}/advance")
+        detail_response = client.get(f"/api/runs/{run['id']}")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+
+    assert failed_advance_response.status_code == 200
+    failed_execution = failed_advance_response.json()
+    assert failed_execution["status"] == "failed"
+    assert failed_execution["action"] == "read-intent"
+    assert Path(failed_execution["stderr_path"]).exists()
+
+    detail = detail_response.json()
+    assert detail["status"] == "failed"
+    assert detail["tasks"][1]["status"] == "failed"
+    assert detail["tasks"][1]["last_error"] is not None
+
+    snapshot = recovery_response.json()
+    assert snapshot["run_status"] == "failed"
+    assert snapshot["recovery_status"] == "attention_required"
+    assert snapshot["can_advance"] is False
+    assert snapshot["current_task"]["status"] == "failed"
+    assert "failed with last error" in snapshot["blocking_reason"]
+    assert snapshot["last_execution"]["id"] == failed_execution["id"]
+    assert snapshot["last_execution"]["status"] == "failed"
+    assert any("stderr_path and stdout_path" in hint for hint in snapshot["restart_hints"])
+
+    artifact_payload = json.loads(
+        Path(snapshot["artifact_paths"]["recovery_snapshot"]).read_text(encoding="utf-8")
+    )
+    assert artifact_payload["run_status"] == "failed"
+    assert artifact_payload["last_execution"]["id"] == failed_execution["id"]
 
 
 def test_advance_can_complete_default_task_graph(tmp_path: Path) -> None:
@@ -311,6 +382,7 @@ def test_ambiguous_next_action_state_fails_closed(tmp_path: Path) -> None:
         advance_response = client.post(f"/api/runs/{run['id']}/advance")
         detail_response = client.get(f"/api/runs/{run['id']}")
         executions_response = client.get(f"/api/runs/{run['id']}/executions")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
 
     assert next_action_response.status_code == 409
     assert advance_response.status_code == 409
@@ -325,3 +397,54 @@ def test_ambiguous_next_action_state_fails_closed(tmp_path: Path) -> None:
         for event in detail["events"]
     )
     assert executions_response.json()["items"] == []
+
+    snapshot = recovery_response.json()
+    assert snapshot["recovery_status"] == "attention_required"
+    assert snapshot["can_advance"] is False
+    assert snapshot["latest_decision"]["status"] == "blocked"
+    assert snapshot["latest_decision"]["detail"] == snapshot["blocking_reason"]
+
+    advance_log = Path(snapshot["artifact_paths"]["advance_log"])
+    last_decision = json.loads(advance_log.read_text(encoding="utf-8").splitlines()[-1])
+    assert last_decision["status"] == "blocked"
+    assert last_decision["detail"] == snapshot["latest_decision"]["detail"]
+
+
+def test_blocked_task_state_surfaces_recovery_hints(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Show recovery guidance for blocked tasks"},
+        )
+        run = create_response.json()
+        settings = client.app.state.settings
+
+        with connect(settings) as connection:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'blocked',
+                    last_error = 'Operator review is required before continuing'
+                WHERE id = ? AND run_id = ?
+                """,
+                (run["tasks"][0]["id"], run["id"]),
+            )
+            connection.execute(
+                """
+                UPDATE runs
+                SET status = 'blocked'
+                WHERE id = ?
+                """,
+                (run["id"],),
+            )
+
+        next_action_response = client.get(f"/api/runs/{run['id']}/next-action")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+
+    assert next_action_response.status_code == 409
+    snapshot = recovery_response.json()
+    assert snapshot["run_status"] == "blocked"
+    assert snapshot["recovery_status"] == "attention_required"
+    assert snapshot["current_task"]["status"] == "blocked"
+    assert "blocked with last error" in snapshot["blocking_reason"]
+    assert any("Inspect last_error" in hint for hint in snapshot["restart_hints"])

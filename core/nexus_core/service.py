@@ -17,6 +17,10 @@ from .models import (
     EventRecord,
     ExecutionRecord,
     NextActionRecord,
+    RecoveryArtifactPaths,
+    RecoveryDecisionSummary,
+    RecoverySnapshot,
+    RecoveryTaskSummary,
     RunDetail,
     RunSummary,
     SystemSummary,
@@ -69,6 +73,8 @@ DEFAULT_ACTION_BY_TASK_KIND: dict[str, str] = {
     "implementation": "list-root",
     "verification": "list-artifacts",
 }
+
+RECOVERY_ARTIFACT_NAME = "run-recovery.json"
 
 
 def utc_now() -> str:
@@ -151,6 +157,7 @@ def create_run(settings: Settings, request: CreateRunRequest) -> RunDetail:
         _log_event(connection, run_id, "info", "Initial task graph materialized", utc_now())
 
     _write_initial_artifacts(workspace, request.intent, tasks, created_at)
+    _persist_recovery_snapshot(settings, run_id)
     return get_run(settings, run_id)
 
 
@@ -214,6 +221,12 @@ def recommend_next_action(settings: Settings, run_id: str) -> NextActionRecord:
     return recommendation
 
 
+def get_recovery_snapshot(settings: Settings, run_id: str) -> RecoverySnapshot:
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        return _build_recovery_snapshot(connection, run_row)
+
+
 def advance_run(settings: Settings, run_id: str) -> ExecutionRecord:
     with connect(settings) as connection:
         run_row = _fetch_run_row(connection, run_id)
@@ -233,6 +246,7 @@ def advance_run(settings: Settings, run_id: str) -> ExecutionRecord:
                     "detail": warning,
                 },
             )
+            _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
             connection.commit()
             raise ValueError("No safe next action")
 
@@ -250,6 +264,7 @@ def advance_run(settings: Settings, run_id: str) -> ExecutionRecord:
             workspace,
             {
                 "created_at": created_at,
+                "status": "recommended",
                 **recommendation.model_dump(),
             },
         )
@@ -281,6 +296,7 @@ def create_execution(
                 f"Blocked execution action '{request.action}' without task scope.",
                 start_time,
             )
+            _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
             connection.commit()
             raise ValueError("task_id is required")
         task_row = _fetch_task_row(connection, run_id, request.task_id)
@@ -292,6 +308,7 @@ def create_execution(
                 f"Blocked execution action '{request.action}'.",
                 start_time,
             )
+            _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
             connection.commit()
             raise ValueError(f"Action '{request.action}' is not allowed")
 
@@ -305,6 +322,7 @@ def create_execution(
                 ),
                 start_time,
             )
+            _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
             connection.commit()
             raise ValueError("Task must be ready or running before execution")
         allowed_actions = _available_actions_for_kind(str(task_row["kind"]))
@@ -318,6 +336,7 @@ def create_execution(
                 ),
                 start_time,
             )
+            _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
             connection.commit()
             raise ValueError(
                 f"Action '{request.action}' is not allowed for task kind '{task_row['kind']}'"
@@ -434,6 +453,10 @@ def create_execution(
                 finish_time,
             )
         _update_run_status(connection, run_id)
+        _write_recovery_snapshot(
+            workspace,
+            _build_recovery_snapshot(connection, _fetch_run_row(connection, run_id)),
+        )
 
     return get_execution(settings, run_id, execution_id)
 
@@ -520,6 +543,30 @@ def _append_advance_record(workspace: Path, payload: dict[str, object]) -> None:
     with artifact_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload))
         handle.write("\n")
+
+
+def _persist_recovery_snapshot(settings: Settings, run_id: str) -> None:
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        workspace = Path(run_row["workspace_path"])
+        _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
+
+
+def _write_recovery_snapshot(workspace: Path, snapshot: RecoverySnapshot) -> None:
+    artifact_path = workspace / "artifacts" / RECOVERY_ARTIFACT_NAME
+    artifact_path.write_text(
+        json.dumps(snapshot.model_dump(mode="json"), indent=2),
+        encoding="utf-8",
+    )
+
+
+def _recovery_artifact_paths(workspace: Path) -> RecoveryArtifactPaths:
+    return RecoveryArtifactPaths(
+        intent=str(workspace / "intent.md"),
+        initial_plan=str(workspace / "artifacts" / "initial-plan.json"),
+        advance_log=str(workspace / "artifacts" / "advance-decisions.jsonl"),
+        recovery_snapshot=str(workspace / "artifacts" / RECOVERY_ARTIFACT_NAME),
+    )
 
 
 def _fetch_run_row(connection: sqlite3.Connection, run_id: str) -> sqlite3.Row:
@@ -625,6 +672,217 @@ def _resolve_next_action(
             ),
         ),
         None,
+    )
+
+
+def _build_recovery_snapshot(
+    connection: sqlite3.Connection,
+    run_row: sqlite3.Row,
+) -> RecoverySnapshot:
+    run_id = str(run_row["id"])
+    run_status = str(run_row["status"])
+    workspace = Path(run_row["workspace_path"])
+    task_rows = connection.execute(
+        """
+        SELECT id, kind, title, status, position, started_at, finished_at, last_error
+        FROM tasks
+        WHERE run_id = ?
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    ).fetchall()
+    next_action, problem = _resolve_next_action(connection, run_row)
+    current_task = _recovery_current_task(task_rows, next_action)
+    last_execution = _fetch_latest_execution(connection, run_id)
+    latest_decision = _read_latest_decision_summary(workspace)
+    recovery_status, summary, blocking_reason, restart_hints = _recovery_guidance(
+        run_id=run_id,
+        run_status=run_status,
+        current_task=current_task,
+        next_action=next_action,
+        last_execution=last_execution,
+        problem=problem,
+        ready_count=sum(1 for row in task_rows if row["status"] == "ready"),
+    )
+
+    return RecoverySnapshot(
+        run_id=run_id,
+        run_status=run_status,
+        recovery_status=recovery_status,
+        can_advance=next_action is not None,
+        summary=summary,
+        blocking_reason=blocking_reason,
+        restart_hints=restart_hints,
+        current_task=current_task,
+        next_action=next_action,
+        last_execution=last_execution,
+        latest_decision=latest_decision,
+        artifact_paths=_recovery_artifact_paths(workspace),
+        updated_at=utc_now(),
+    )
+
+
+def _recovery_current_task(
+    task_rows: list[sqlite3.Row],
+    next_action: NextActionRecord | None,
+) -> RecoveryTaskSummary | None:
+    if next_action is not None:
+        for row in task_rows:
+            if row["id"] == next_action.task_id:
+                return RecoveryTaskSummary(
+                    id=str(row["id"]),
+                    kind=str(row["kind"]),
+                    title=str(row["title"]),
+                    status=str(row["status"]),
+                    last_error=row["last_error"],
+                )
+
+    for status in ("running", "failed", "blocked", "ready", "pending"):
+        for row in task_rows:
+            if row["status"] == status:
+                return RecoveryTaskSummary(
+                    id=str(row["id"]),
+                    kind=str(row["kind"]),
+                    title=str(row["title"]),
+                    status=str(row["status"]),
+                    last_error=row["last_error"],
+                )
+    return None
+
+
+def _fetch_latest_execution(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> ExecutionRecord | None:
+    row = connection.execute(
+        """
+        SELECT id, run_id, task_id, action, status, command_argv_json, cwd,
+               started_at, finished_at, exit_code, stdout_path, stderr_path
+        FROM executions
+        WHERE run_id = ?
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
+        """,
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _execution_from_row(row)
+
+
+def _read_latest_decision_summary(workspace: Path) -> RecoveryDecisionSummary | None:
+    artifact_path = workspace / "artifacts" / "advance-decisions.jsonl"
+    if not artifact_path.exists():
+        return None
+
+    lines = artifact_path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return None
+
+    payload = json.loads(lines[-1])
+    return RecoveryDecisionSummary(
+        created_at=str(payload.get("created_at", "")),
+        status=str(payload.get("status", "recommended")),
+        action=payload.get("action"),
+        detail=payload.get("detail"),
+    )
+
+
+def _recovery_guidance(
+    *,
+    run_id: str,
+    run_status: str,
+    current_task: RecoveryTaskSummary | None,
+    next_action: NextActionRecord | None,
+    last_execution: ExecutionRecord | None,
+    problem: str | None,
+    ready_count: int,
+) -> tuple[str, str, str | None, list[str]]:
+    if run_status == "completed":
+        return (
+            "completed",
+            "Run completed successfully. No restart is required.",
+            None,
+            ["No restart required."],
+        )
+
+    if run_status == "running":
+        return (
+            "running",
+            "A bounded execution is currently in progress for this run.",
+            None,
+            [
+                "Wait for the current execution to finish before advancing again.",
+                f"Inspect GET /api/runs/{run_id}/executions for the latest execution logs.",
+            ],
+        )
+
+    if next_action is not None and current_task is not None:
+        return (
+            "ready",
+            (
+                f"Run can advance with '{next_action.action}' on task "
+                f"'{current_task.title}'."
+            ),
+            None,
+            [
+                f"Call POST /api/runs/{run_id}/advance to continue.",
+                f"Use GET /api/runs/{run_id}/next-action to preview the safe next step.",
+            ],
+        )
+
+    blocking_reason = problem
+    if current_task is not None and current_task.status == "failed" and current_task.last_error:
+        blocking_reason = (
+            f"Task '{current_task.title}' failed with last error: {current_task.last_error}"
+        )
+    elif current_task is not None and current_task.status == "blocked" and current_task.last_error:
+        blocking_reason = (
+            f"Task '{current_task.title}' is blocked with last error: {current_task.last_error}"
+        )
+
+    restart_hints: list[str] = [
+        f"Inspect GET /api/runs/{run_id} for task statuses and recent events.",
+        f"Review {workspace_hint(last_execution)} before taking a manual recovery action.",
+    ]
+    if current_task is not None and current_task.status == "failed":
+        restart_hints = [
+            "Inspect stderr_path and stdout_path from the last execution before retrying.",
+            "Repair the workspace inputs or artifacts that caused the failed task.",
+            f"Inspect GET /api/runs/{run_id} for the failed task and recent events.",
+        ]
+    elif current_task is not None and current_task.status == "blocked":
+        restart_hints = [
+            "Inspect last_error and recent events before changing task state.",
+            "Review workspace artifacts and decide on a manual recovery action.",
+            f"Check GET /api/runs/{run_id} for the blocked task context.",
+        ]
+    elif ready_count > 1:
+        restart_hints = [
+            "Resolve task graph ambiguity so exactly one task is ready.",
+            f"Inspect GET /api/runs/{run_id} before retrying advance.",
+            "Review the latest recovery snapshot artifact for the current blocker.",
+        ]
+    elif run_status == "failed":
+        restart_hints = [
+            "Inspect stderr_path and stdout_path from the last execution before retrying.",
+            "Repair the workspace state before attempting manual recovery.",
+            f"Inspect GET /api/runs/{run_id} for the failure context.",
+        ]
+
+    return (
+        "attention_required",
+        "Run cannot advance safely until the blocking state is resolved.",
+        blocking_reason or "No safe next action is available for the current run state.",
+        restart_hints,
+    )
+
+
+def workspace_hint(last_execution: ExecutionRecord | None) -> str:
+    if last_execution is None:
+        return "the run workspace artifacts"
+    return (
+        f"{last_execution.stderr_path} and {last_execution.stdout_path}"
     )
 
 
