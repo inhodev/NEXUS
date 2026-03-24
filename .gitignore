@@ -7,7 +7,6 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .coverage
-.worktrees/
 .nexus/
 node_modules/
 .next/

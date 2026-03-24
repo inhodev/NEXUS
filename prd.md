@@ -344,7 +344,7 @@ The Distributed Execution Fabric executes tasks and generated code safely.
 - Enable restart/resume semantics
 
 ### Initial v1 Scope
-- Local-first execution using Docker and isolated folders/workspaces
+- Local-first execution using isolated folders/workspaces and native host processes
 - Queue or event-driven orchestration
 - Optional local K8s abstraction hooks
 
@@ -447,7 +447,7 @@ Performs quality, structure, and maintainability review.
 Performs risk analysis and security review.
 
 ### DevOps Agent
-Builds runbooks, local infra, CI, containers, and preview workflows.
+Builds runbooks, local infra, CI, and preview workflows.
 
 ### Librarian Agent
 Indexes artifacts and links knowledge across runs.
@@ -568,12 +568,13 @@ The UX should feel like:
 ### 17.1 Recommended Initial Stack
 - Python for orchestration core
 - FastAPI for APIs
-- PostgreSQL for structured data
-- Redis for queues/event streams
-- Vector retrieval via Qdrant or pgvector
+- SQLite or local file-backed persistence for the first control-plane slice
+- PostgreSQL for structured data once multi-process or multi-user needs justify it
+- In-process queues or background workers first, Redis later if needed
+- Local file index or lightweight metadata store first, Qdrant or pgvector later if needed
 - Next.js + TypeScript for Embassy UI
-- Docker / docker-compose for local orchestration
-- Optional kind/k3d abstraction for local cluster evolution
+- Native local execution for development and orchestration
+- Optional kind/k3d abstraction for future cluster evolution
 
 ### 17.2 Architectural Shape
 - `core/` for runtime, orchestration, agents, policies
@@ -632,7 +633,7 @@ Deliver:
 - initial docs
 
 Success:
-- system boots locally
+- system boots locally without Docker
 - request can be registered and tracked
 
 ### Milestone 2 — Parliament
@@ -765,4 +766,3 @@ A release of NEXUS is considered meaningfully complete when:
 7. Risky operations are policy-gated.
 8. NEXUS can perform at least one bounded self-improvement cycle safely.
 9. The entire workflow is restartable and auditable.
-

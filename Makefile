@@ -8,27 +8,27 @@ help:
 	@printf '%s\n' \
 		'Available targets:' \
 		'  make setup           Prepare the native local environment' \
-		'  make run             Start the current native service entrypoint' \
-		'  make test            Validate tooling scripts' \
-		'  make smoke           Run no-Docker bootstrap smoke checks' \
+		'  make run             Start the local-first NEXUS control plane' \
+		'  make test            Run lint and tests for the current slice' \
+		'  make smoke           Start the API temporarily and smoke-check it' \
 		'  make doctor          Report local prerequisites' \
 		'  make worktree NAME=x Bootstrap .worktrees/x for Codex threads'
 
 setup:
-	@bash ./scripts/nexus.sh setup
+	@bash ./.codex/actions/setup.sh
 
 run:
-	@bash ./scripts/nexus.sh run
+	@bash ./.codex/actions/run-api.sh
 
 test:
-	@bash ./scripts/nexus.sh test
+	@bash ./.codex/actions/test.sh
 
 smoke:
-	@bash ./scripts/nexus.sh smoke
+	@bash ./.codex/actions/smoke.sh
 
 doctor:
-	@bash ./scripts/nexus.sh doctor
+	@bash ./.codex/actions/doctor.sh
 
 worktree:
 	@test -n "$(NAME)" || (printf '%s\n' 'error: NAME is required, for example: make worktree NAME=agent-core' >&2; exit 1)
-	@bash ./scripts/nexus.sh worktree "$(NAME)"
+	@bash ./.codex/setup/create-worktree.sh "$(NAME)"

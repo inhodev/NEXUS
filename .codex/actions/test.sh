@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+VENV_BIN="$ROOT_DIR/.venv/bin"
 
 cd "$ROOT_DIR"
-uv run ruff check .
-uv run pytest
+"$VENV_BIN/ruff" check .
+"$VENV_BIN/pytest"
