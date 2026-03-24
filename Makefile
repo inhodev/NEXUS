@@ -3,7 +3,7 @@
 NAME ?=
 BASE_REF ?=
 
-.PHONY: help setup run test smoke doctor worktree
+.PHONY: help setup run test smoke claim-smoke doctor worktree
 
 help:
 	@printf '%s\n' \
@@ -12,6 +12,7 @@ help:
 		'  make run             Start the local-first NEXUS control plane' \
 		'  make test            Run lint and tests for the current slice' \
 		'  make smoke           Start the API temporarily and smoke-check it' \
+		'  make claim-smoke     Opt in to the real dispatch claim smoke path' \
 		'  make doctor          Report local prerequisites' \
 		'  make worktree NAME=x BASE_REF=<sha> Bootstrap .worktrees/x for Codex threads'
 
@@ -26,6 +27,9 @@ test:
 
 smoke:
 	@zsh ./.codex/actions/smoke.sh
+
+claim-smoke:
+	@zsh ./.codex/actions/claim-smoke.sh
 
 doctor:
 	@zsh ./.codex/actions/doctor.sh

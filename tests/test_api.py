@@ -22,6 +22,18 @@ def test_health_endpoint(tmp_path: Path) -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_embassy_route_serves_dashboard(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        response = client.get("/embassy")
+        healthz_response = client.get("/embassy/healthz")
+
+    assert response.status_code == 200
+    assert "NEXUS Embassy" in response.text
+    assert 'data-api-base="/api"' in response.text
+    assert healthz_response.status_code == 200
+    assert healthz_response.json() == {"status": "ok"}
+
+
 def test_create_request_materializes_workspace_and_tasks(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         agents_response = client.get("/api/agents")
@@ -390,6 +402,313 @@ def test_claim_failed_dispatch_can_retry_same_handoff(tmp_path: Path, monkeypatc
     assert [record["status"] for record in records] == ["prepared", "claim_failed", "claimed"]
 
 
+def test_dispatch_heartbeat_refreshes_stale_claim(tmp_path: Path, monkeypatch) -> None:
+    from nexus_core import service as service_module
+
+    def fake_materialize(settings, dispatch, command_argv):
+        Path(dispatch.worktree_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=0,
+            stdout="claimed\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(service_module, "_materialize_dispatch_worktree", fake_materialize)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Refresh a stale claimed dispatch with a worker heartbeat"},
+        )
+        run = create_response.json()
+        settings = client.app.state.settings
+        dispatch = client.post(f"/api/runs/{run['id']}/dispatches").json()
+        claim_response = client.post(f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim")
+        assert claim_response.status_code == 200
+
+        with connect(settings) as connection:
+            connection.execute(
+                """
+                UPDATE dispatches
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("2000-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00", dispatch["id"]),
+            )
+
+        stale_recovery = client.get(f"/api/runs/{run['id']}/recovery")
+        heartbeat_response = client.post(
+            f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/heartbeat"
+        )
+        fresh_recovery = client.get(f"/api/runs/{run['id']}/recovery")
+
+    stale_payload = stale_recovery.json()
+    assert stale_payload["recovery_status"] == "attention_required"
+    assert any(
+        action["action"] == "release-claim" and action["task_id"] == dispatch["task_id"]
+        for action in stale_payload["available_recovery_actions"]
+    )
+
+    assert heartbeat_response.status_code == 200
+    heartbeat_dispatch = heartbeat_response.json()
+    assert heartbeat_dispatch["status"] == "claimed"
+    assert heartbeat_dispatch["heartbeat_at"] is not None
+    assert heartbeat_dispatch["lease_expires_at"] is not None
+
+    fresh_payload = fresh_recovery.json()
+    assert fresh_payload["recovery_status"] == "running"
+    assert fresh_payload["latest_dispatch"]["status"] == "claimed"
+    assert fresh_payload["available_recovery_actions"] == []
+
+
+def test_stale_claim_can_be_released_via_recover(tmp_path: Path, monkeypatch) -> None:
+    from nexus_core import service as service_module
+
+    def fake_materialize(settings, dispatch, command_argv):
+        Path(dispatch.worktree_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=0,
+            stdout="claimed\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(service_module, "_materialize_dispatch_worktree", fake_materialize)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Release a stale claimed dispatch through recovery"},
+        )
+        run = create_response.json()
+        settings = client.app.state.settings
+        dispatch = client.post(f"/api/runs/{run['id']}/dispatches").json()
+        claim_response = client.post(f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim")
+        assert claim_response.status_code == 200
+
+        with connect(settings) as connection:
+            connection.execute(
+                """
+                UPDATE dispatches
+                SET lease_expires_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ("2000-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00", dispatch["id"]),
+            )
+
+        stale_recovery = client.get(f"/api/runs/{run['id']}/recovery")
+        recover_response = client.post(
+            f"/api/runs/{run['id']}/recover",
+            json={"action": "release-claim", "task_id": dispatch["task_id"]},
+        )
+        fresh_recovery = client.get(f"/api/runs/{run['id']}/recovery")
+        dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
+
+    stale_payload = stale_recovery.json()
+    assert stale_payload["recovery_status"] == "attention_required"
+    assert any(
+        action["action"] == "release-claim"
+        for action in stale_payload["available_recovery_actions"]
+    )
+
+    assert recover_response.status_code == 200
+    dispatches = dispatches_response.json()
+    assert dispatches[0]["status"] == "invalidated"
+    assert "released a stale claimed dispatch" in recover_response.json()["summary"]
+
+    fresh_payload = fresh_recovery.json()
+    assert fresh_payload["recovery_status"] == "ready"
+    assert fresh_payload["can_advance"] is True
+    assert fresh_payload["latest_dispatch"]["status"] == "invalidated"
+
+
+def test_complete_dispatch_advances_task_and_writes_result_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from nexus_core import service as service_module
+
+    def fake_materialize(settings, dispatch, command_argv):
+        Path(dispatch.worktree_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=0,
+            stdout="claimed\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(service_module, "_materialize_dispatch_worktree", fake_materialize)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Accept a worker result and advance the run graph"},
+        )
+        run = create_response.json()
+        dispatch = client.post(f"/api/runs/{run['id']}/dispatches").json()
+        claim_response = client.post(f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim")
+        assert claim_response.status_code == 200
+
+        complete_response = client.post(
+            f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/complete",
+            json={
+                "summary": "Completed the intake handoff safely",
+                "changed_files": ["README.md"],
+                "commands_run": ["make test"],
+                "tests_run": ["pytest tests/test_api.py"],
+                "artifacts": ["artifacts/dispatches.jsonl"],
+                "risk_notes": ["No repository mutations were performed in the worker"],
+            },
+        )
+        detail_response = client.get(f"/api/runs/{run['id']}")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+        dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
+
+    assert complete_response.status_code == 200
+    completed_dispatch = complete_response.json()
+    assert completed_dispatch["status"] == "completed"
+    assert completed_dispatch["result_manifest_path"] is not None
+    manifest_path = Path(completed_dispatch["result_manifest_path"])
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "completed"
+    assert manifest["summary"] == "Completed the intake handoff safely"
+    assert manifest["changed_files"] == ["README.md"]
+    assert manifest["artifacts"] == ["artifacts/dispatches.jsonl"]
+
+    detail = detail_response.json()
+    assert detail["tasks"][0]["status"] == "completed"
+    assert detail["tasks"][1]["status"] == "ready"
+
+    recovery = recovery_response.json()
+    assert recovery["run_status"] == "ready"
+    assert recovery["can_advance"] is True
+    assert recovery["next_action"]["task_id"] == run["tasks"][1]["id"]
+
+    dispatches = dispatches_response.json()
+    assert dispatches[0]["status"] == "completed"
+
+
+def test_failed_dispatch_marks_task_failed_and_surfaces_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from nexus_core import service as service_module
+
+    def fake_materialize(settings, dispatch, command_argv):
+        Path(dispatch.worktree_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=0,
+            stdout="claimed\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(service_module, "_materialize_dispatch_worktree", fake_materialize)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Surface worker-reported failure back into the run state"},
+        )
+        run = create_response.json()
+        dispatch = client.post(f"/api/runs/{run['id']}/dispatches").json()
+        claim_response = client.post(f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim")
+        assert claim_response.status_code == 200
+
+        fail_response = client.post(
+            f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/fail",
+            json={
+                "summary": "Unit tests failed inside the claimed worktree",
+                "changed_files": ["core/nexus_core/service.py"],
+                "commands_run": ["make test"],
+                "tests_run": ["pytest tests/test_api.py"],
+                "artifacts": ["artifacts/dispatch-claims/claim.log"],
+                "risk_notes": ["Worker stopped before modifying production files"],
+            },
+        )
+        detail_response = client.get(f"/api/runs/{run['id']}")
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+
+    assert fail_response.status_code == 200
+    failed_dispatch = fail_response.json()
+    assert failed_dispatch["status"] == "worker_failed"
+    assert Path(failed_dispatch["result_manifest_path"]).exists()
+
+    detail = detail_response.json()
+    assert detail["status"] == "failed"
+    assert detail["tasks"][0]["status"] == "failed"
+    assert detail["tasks"][0]["last_error"] == "Unit tests failed inside the claimed worktree"
+
+    recovery = recovery_response.json()
+    assert recovery["run_status"] == "failed"
+    assert recovery["recovery_status"] == "attention_required"
+    assert recovery["latest_dispatch"]["status"] == "worker_failed"
+    assert recovery["latest_dispatch"]["result_manifest_path"].endswith(".json")
+
+
+def test_blocked_dispatch_marks_task_blocked_and_allows_recovery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from nexus_core import service as service_module
+
+    def fake_materialize(settings, dispatch, command_argv):
+        Path(dispatch.worktree_path).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(
+            args=command_argv,
+            returncode=0,
+            stdout="claimed\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(service_module, "_materialize_dispatch_worktree", fake_materialize)
+
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Surface a blocked worker report into recovery"},
+        )
+        run = create_response.json()
+        dispatch = client.post(f"/api/runs/{run['id']}/dispatches").json()
+        claim_response = client.post(f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim")
+        assert claim_response.status_code == 200
+
+        block_response = client.post(
+            f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/block",
+            json={
+                "summary": "Waiting for a missing workspace prerequisite",
+                "changed_files": [],
+                "commands_run": ["make setup"],
+                "tests_run": [],
+                "artifacts": ["artifacts/dispatch-claims/block-note.txt"],
+                "risk_notes": ["No safe path forward until the prerequisite exists"],
+            },
+        )
+        recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
+        detail_response = client.get(f"/api/runs/{run['id']}")
+
+    assert block_response.status_code == 200
+    blocked_dispatch = block_response.json()
+    assert blocked_dispatch["status"] == "worker_blocked"
+    assert Path(blocked_dispatch["result_manifest_path"]).exists()
+
+    detail = detail_response.json()
+    assert detail["status"] == "blocked"
+    assert detail["tasks"][0]["status"] == "blocked"
+    assert detail["tasks"][0]["last_error"] == "Waiting for a missing workspace prerequisite"
+
+    recovery = recovery_response.json()
+    assert recovery["run_status"] == "blocked"
+    assert recovery["recovery_status"] == "attention_required"
+    assert recovery["latest_dispatch"]["status"] == "worker_blocked"
+    assert any(
+        action["action"] == "requeue-task"
+        for action in recovery["available_recovery_actions"]
+    )
+
+
 def test_execution_invalidates_prepared_dispatch(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         create_response = client.post(
@@ -617,6 +936,49 @@ def test_failed_task_can_be_requeued_via_recover(tmp_path: Path) -> None:
     assert resumed_advance_response.status_code == 200
     assert resumed_advance_response.json()["status"] == "completed"
     assert resumed_advance_response.json()["action"] == "read-intent"
+
+
+def test_memory_search_endpoint_returns_ranked_hits(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Build audit-ready dispatch memory"},
+        )
+        run = create_response.json()
+        workspace = Path(run["workspace_path"])
+        (workspace / "artifacts" / "notes.txt").write_text(
+            "Dispatch memory keeps audit evidence and worker handoff logs.\n",
+            encoding="utf-8",
+        )
+        (workspace / "executions" / "exec_fake").mkdir(parents=True, exist_ok=True)
+        (workspace / "executions" / "exec_fake" / "stdout.txt").write_text(
+            "worker handoff logs are searchable\n",
+            encoding="utf-8",
+        )
+
+        response = client.get(
+            f"/api/runs/{run['id']}/memory/search",
+            params={"q": "worker handoff logs", "limit": 3},
+        )
+        no_exec_response = client.get(
+            f"/api/runs/{run['id']}/memory/search",
+            params={
+                "q": "worker handoff logs",
+                "limit": 3,
+                "include_executions": "false",
+            },
+        )
+
+    assert response.status_code == 200
+    hits = response.json()
+    assert hits
+    assert any(hit["entry"]["source_path"].endswith("stdout.txt") for hit in hits)
+    assert any("worker handoff logs" in hit["snippet"].lower() for hit in hits)
+
+    assert no_exec_response.status_code == 200
+    no_exec_hits = no_exec_response.json()
+    assert no_exec_hits
+    assert all(not hit["entry"]["source_path"].endswith("stdout.txt") for hit in no_exec_hits)
 
 
 def test_advance_can_complete_default_task_graph(tmp_path: Path) -> None:

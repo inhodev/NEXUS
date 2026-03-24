@@ -8,7 +8,16 @@ RunStatus = Literal["queued", "ready", "running", "blocked", "failed", "complete
 TaskStatus = Literal["pending", "ready", "running", "blocked", "failed", "completed"]
 ExecutionStatus = Literal["running", "completed", "failed", "blocked"]
 RecoveryStatus = Literal["ready", "running", "attention_required", "completed"]
-DispatchStatus = Literal["prepared", "claimed", "claim_failed", "superseded", "invalidated"]
+DispatchStatus = Literal[
+    "prepared",
+    "claimed",
+    "claim_failed",
+    "completed",
+    "worker_failed",
+    "worker_blocked",
+    "superseded",
+    "invalidated",
+]
 
 
 class CreateRunRequest(BaseModel):
@@ -18,6 +27,15 @@ class CreateRunRequest(BaseModel):
 class CreateExecutionRequest(BaseModel):
     action: str = Field(min_length=1, max_length=128)
     task_id: str | None = None
+
+
+class DispatchResultRequest(BaseModel):
+    summary: str = Field(min_length=1, max_length=2_000)
+    changed_files: list[str] = Field(default_factory=list)
+    commands_run: list[str] = Field(default_factory=list)
+    tests_run: list[str] = Field(default_factory=list)
+    artifacts: list[str] = Field(default_factory=list)
+    risk_notes: list[str] = Field(default_factory=list)
 
 
 class TaskRecord(BaseModel):
@@ -136,10 +154,28 @@ class DispatchRecord(BaseModel):
     claim_stdout_path: str | None = None
     claim_stderr_path: str | None = None
     claimed_at: str | None = None
+    heartbeat_at: str | None = None
+    lease_expires_at: str | None = None
+    result_manifest_path: str | None = None
     status: DispatchStatus
     status_detail: str | None = None
     created_at: str
     updated_at: str
+
+
+class MemoryEntryRecord(BaseModel):
+    id: str
+    source_path: str
+    kind: str
+    title: str
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class MemorySearchHitRecord(BaseModel):
+    entry: MemoryEntryRecord
+    score: int
+    snippet: str
+    matched_terms: list[str] = Field(default_factory=list)
 
 
 class RecoverySnapshot(BaseModel):

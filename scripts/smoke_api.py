@@ -32,6 +32,9 @@ def main() -> int:
         status, health = request_json(f"{args.base_url}/healthz")
         assert status == 200 and health["status"] == "ok"
 
+        status, embassy_health = request_json(f"{args.base_url}/embassy/healthz")
+        assert status == 200 and embassy_health["status"] == "ok"
+
         status, agents = request_json(f"{args.base_url}/api/agents")
         assert status == 200 and len(agents["items"]) >= 4
 
@@ -53,6 +56,12 @@ def main() -> int:
         assert recovery["can_advance"] is True
         assert recovery["latest_dispatch"]["id"] == dispatch["id"]
         assert recovery["latest_dispatch"]["status"] == "prepared"
+
+        status, memory_hits = request_json(
+            f"{args.base_url}/api/runs/{run['id']}/memory/search?q=smoke&limit=3"
+        )
+        assert status == 200
+        assert len(memory_hits) >= 1
 
         status, next_action = request_json(f"{args.base_url}/api/runs/{run['id']}/next-action")
         assert status == 200

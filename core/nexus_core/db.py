@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS dispatches (
     claim_stdout_path TEXT,
     claim_stderr_path TEXT,
     claimed_at TEXT,
+    heartbeat_at TEXT,
+    lease_expires_at TEXT,
+    result_manifest_path TEXT,
     status TEXT NOT NULL,
     status_detail TEXT,
     created_at TEXT NOT NULL,
@@ -92,6 +95,9 @@ def initialize_database(settings: Settings) -> None:
         _ensure_column(connection, "dispatches", "claim_stdout_path", "TEXT")
         _ensure_column(connection, "dispatches", "claim_stderr_path", "TEXT")
         _ensure_column(connection, "dispatches", "claimed_at", "TEXT")
+        _ensure_column(connection, "dispatches", "heartbeat_at", "TEXT")
+        _ensure_column(connection, "dispatches", "lease_expires_at", "TEXT")
+        _ensure_column(connection, "dispatches", "result_manifest_path", "TEXT")
         _ensure_column(connection, "dispatches", "status_detail", "TEXT")
         _ensure_column(connection, "dispatches", "updated_at", "TEXT")
 

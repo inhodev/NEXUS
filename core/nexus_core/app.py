@@ -11,7 +11,9 @@ from .models import (
     CreateExecutionRequest,
     CreateRunRequest,
     DispatchRecord,
+    DispatchResultRequest,
     ExecutionRecord,
+    MemorySearchHitRecord,
     NextActionRecord,
     RecoveryActionRequest,
     RecoveryActionResult,
@@ -23,21 +25,27 @@ from .models import (
 from .service import (
     AGENT_ROLES,
     advance_run,
+    block_dispatch,
     claim_dispatch,
+    complete_dispatch,
     create_dispatch,
     create_execution,
     create_run,
+    fail_dispatch,
     get_execution,
     get_recovery_snapshot,
     get_run,
     get_system_summary,
+    heartbeat_dispatch,
     list_action_descriptors,
     list_dispatches,
     list_executions,
     list_runs,
     recommend_next_action,
     recover_run,
+    search_run_memory,
 )
+from .ui import build_embassy_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -55,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = app_settings
+    app.include_router(build_embassy_router(api_base="/api"))
 
     @app.get("/")
     def root() -> dict[str, str]:
@@ -131,6 +140,66 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
+    @app.post(
+        "/api/runs/{run_id}/dispatches/{dispatch_id}/heartbeat",
+        response_model=DispatchRecord,
+    )
+    def heartbeat_dispatch_endpoint(run_id: str, dispatch_id: str) -> DispatchRecord:
+        try:
+            return heartbeat_dispatch(app_settings, run_id, dispatch_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or dispatch not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post(
+        "/api/runs/{run_id}/dispatches/{dispatch_id}/complete",
+        response_model=DispatchRecord,
+    )
+    def complete_dispatch_endpoint(
+        run_id: str,
+        dispatch_id: str,
+        request: DispatchResultRequest,
+    ) -> DispatchRecord:
+        try:
+            return complete_dispatch(app_settings, run_id, dispatch_id, request)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or dispatch not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post(
+        "/api/runs/{run_id}/dispatches/{dispatch_id}/fail",
+        response_model=DispatchRecord,
+    )
+    def fail_dispatch_endpoint(
+        run_id: str,
+        dispatch_id: str,
+        request: DispatchResultRequest,
+    ) -> DispatchRecord:
+        try:
+            return fail_dispatch(app_settings, run_id, dispatch_id, request)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or dispatch not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @app.post(
+        "/api/runs/{run_id}/dispatches/{dispatch_id}/block",
+        response_model=DispatchRecord,
+    )
+    def block_dispatch_endpoint(
+        run_id: str,
+        dispatch_id: str,
+        request: DispatchResultRequest,
+    ) -> DispatchRecord:
+        try:
+            return block_dispatch(app_settings, run_id, dispatch_id, request)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or dispatch not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+
     @app.post("/api/runs/{run_id}/recover", response_model=RecoveryActionResult)
     def recover_endpoint(run_id: str, request: RecoveryActionRequest) -> RecoveryActionResult:
         try:
@@ -183,6 +252,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return get_execution(app_settings, run_id, execution_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Run or execution not found") from error
+
+    @app.get("/api/runs/{run_id}/memory/search", response_model=list[MemorySearchHitRecord])
+    def search_run_memory_endpoint(
+        run_id: str,
+        q: str,
+        limit: int = 10,
+        include_executions: bool = True,
+    ) -> list[MemorySearchHitRecord]:
+        try:
+            return search_run_memory(
+                app_settings,
+                run_id,
+                q,
+                limit=limit,
+                include_executions=include_executions,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run not found") from error
 
     return app
 

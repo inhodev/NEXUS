@@ -1,0 +1,781 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NEXUS Embassy</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0f1115;
+      --bg-elevated: #151922;
+      --bg-soft: rgba(255, 255, 255, 0.04);
+      --line: rgba(255, 255, 255, 0.11);
+      --line-strong: rgba(255, 255, 255, 0.18);
+      --text: #f2efe9;
+      --muted: #a7a39c;
+      --accent: #d8b35d;
+      --accent-soft: rgba(216, 179, 93, 0.16);
+      --danger: #ff7c74;
+      --success: #6fd69a;
+      --shadow: 0 26px 80px rgba(0, 0, 0, 0.42);
+      --radius: 20px;
+      --radius-sm: 12px;
+      --space-1: 0.5rem;
+      --space-2: 0.75rem;
+      --space-3: 1rem;
+      --space-4: 1.5rem;
+      --space-5: 2rem;
+      --space-6: 3rem;
+      --display-font: "Georgia", "Times New Roman", serif;
+      --body-font: "Avenir Next", "Segoe UI", sans-serif;
+      --mono-font: "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top right, rgba(216, 179, 93, 0.16), transparent 30%),
+        radial-gradient(circle at left center, rgba(111, 214, 154, 0.08), transparent 28%),
+        linear-gradient(180deg, #12151c 0%, #0c0e12 100%);
+      color: var(--text);
+      font-family: var(--body-font);
+      letter-spacing: 0.01em;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 38px 38px;
+      opacity: 0.26;
+      mix-blend-mode: screen;
+    }
+
+    a { color: inherit; }
+    button, input { font: inherit; }
+    .page {
+      width: min(1360px, calc(100vw - 2rem));
+      margin: 0 auto;
+      padding: 1.25rem 0 2.5rem;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: var(--space-4);
+      align-items: end;
+      padding: 1.1rem 0 1.6rem;
+      animation: rise 560ms ease both;
+    }
+
+    .eyebrow {
+      text-transform: uppercase;
+      letter-spacing: 0.28em;
+      font-size: 0.68rem;
+      color: var(--muted);
+      margin-bottom: var(--space-2);
+    }
+
+    h1 {
+      margin: 0;
+      font-family: var(--display-font);
+      font-size: clamp(2.5rem, 6vw, 5.8rem);
+      line-height: 0.93;
+      font-weight: 600;
+    }
+
+    .lede {
+      max-width: 56ch;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1.6;
+      margin: var(--space-3) 0 0;
+    }
+
+    .controls {
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.035);
+      border-radius: var(--radius);
+      padding: var(--space-4);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      display: grid;
+      gap: var(--space-3);
+    }
+
+    .controls-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr auto;
+      gap: var(--space-2);
+    }
+
+    label {
+      display: block;
+      font-size: 0.75rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+
+    input, select, button {
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text);
+      padding: 0.85rem 1rem;
+      width: 100%;
+      transition: border-color 180ms ease, transform 180ms ease, background 180ms ease;
+    }
+
+    input:focus, select:focus, button:focus {
+      outline: none;
+      border-color: rgba(216, 179, 93, 0.85);
+      box-shadow: 0 0 0 3px rgba(216, 179, 93, 0.16);
+    }
+
+    button {
+      cursor: pointer;
+      width: auto;
+      padding-inline: 1.2rem;
+      background: linear-gradient(180deg, rgba(216, 179, 93, 0.26), rgba(216, 179, 93, 0.15));
+      border-color: rgba(216, 179, 93, 0.42);
+    }
+
+    button:hover { transform: translateY(-1px); }
+
+    .shell {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: var(--space-4);
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.035);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      padding: var(--space-4) var(--space-4) var(--space-3);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-header h2, .section-title {
+      margin: 0;
+      font-family: var(--display-font);
+      font-size: 1.2rem;
+      font-weight: 600;
+    }
+
+    .panel-body { padding: var(--space-4); }
+
+    .run-list {
+      display: grid;
+      gap: 0.75rem;
+      max-height: 68vh;
+      overflow: auto;
+      padding-right: 0.2rem;
+    }
+
+    .run-card {
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      padding: 0.95rem 1rem;
+      display: grid;
+      gap: 0.4rem;
+      text-align: left;
+      width: 100%;
+    }
+
+    .run-card.is-active {
+      border-color: rgba(216, 179, 93, 0.75);
+      background: linear-gradient(180deg, rgba(216, 179, 93, 0.16), rgba(255, 255, 255, 0.03));
+    }
+
+    .run-meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+
+    .run-intent {
+      font-size: 0.94rem;
+      line-height: 1.45;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: var(--space-4);
+    }
+
+    .stack {
+      display: grid;
+      gap: var(--space-4);
+    }
+
+    .summary-cards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.8rem;
+    }
+
+    .stat {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 1rem;
+      background: rgba(255, 255, 255, 0.02);
+      min-height: 94px;
+    }
+
+    .stat .label {
+      display: block;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 0.68rem;
+      margin-bottom: 0.35rem;
+    }
+
+    .stat .value {
+      font-size: 1.4rem;
+      font-weight: 600;
+      line-height: 1.15;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 0.45rem 0.75rem;
+      font-size: 0.8rem;
+    }
+
+    .chip strong { color: var(--text); font-weight: 600; }
+
+    .section {
+      display: grid;
+      gap: 0.9rem;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .section-subtitle {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .tasks, .events, .dispatches, .recovery-actions {
+      display: grid;
+      gap: 0.75rem;
+    }
+
+    .task, .event, .dispatch, .recovery-action {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 0.9rem 1rem;
+    }
+
+    .task-top, .dispatch-top, .event-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      align-items: center;
+      margin-bottom: 0.4rem;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.3rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      border: 1px solid var(--line);
+    }
+
+    .badge.ready, .badge.completed { color: var(--success); border-color: rgba(111, 214, 154, 0.34); }
+    .badge.failed, .badge.blocked, .badge.claim_failed { color: var(--danger); border-color: rgba(255, 124, 116, 0.34); }
+    .badge.claimed { color: var(--accent); border-color: rgba(216, 179, 93, 0.42); }
+    .badge.pending, .badge.prepared, .badge.running, .badge.invalidated, .badge.superseded { color: var(--muted); }
+
+    .mono {
+      font-family: var(--mono-font);
+      font-size: 0.85rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
+    .empty {
+      padding: 1rem;
+      border: 1px dashed var(--line);
+      border-radius: 16px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .error {
+      border-color: rgba(255, 124, 116, 0.42);
+      color: #ffb0a9;
+      background: rgba(255, 124, 116, 0.08);
+    }
+
+    .claim-column {
+      display: grid;
+      gap: 0.75rem;
+    }
+
+    .claim-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      font-family: var(--mono-font);
+      font-size: 0.8rem;
+      color: var(--muted);
+      padding-bottom: 0.35rem;
+      border-bottom: 1px solid var(--line);
+    }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(18px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 1080px) {
+      .hero, .shell, .grid { grid-template-columns: 1fr; }
+      .summary-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 720px) {
+      .page { width: min(100vw - 1rem, 100%); padding-top: 0.75rem; }
+      .controls-row, .summary-cards { grid-template-columns: 1fr; }
+      .hero { gap: 1rem; }
+      .panel-header, .panel-body { padding: 1rem; }
+      h1 { font-size: 2.4rem; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page" id="app" data-api-base="__NEXUS_API_BASE__">
+    <section class="hero">
+      <div>
+        <div class="eyebrow">NEXUS Embassy</div>
+        <h1>Supervised autonomy,<br />made inspectable.</h1>
+        <p class="lede">
+          A minimal control surface for runs, recovery, and dispatches. It keeps the system local-first,
+          explicit, and recoverable while the backend grows into a fuller software civilization.
+        </p>
+      </div>
+      <div class="controls">
+        <div class="controls-row">
+          <div>
+            <label for="apiBase">API Base</label>
+            <input id="apiBase" type="text" value="__NEXUS_API_BASE__" />
+          </div>
+          <div>
+            <label for="runSelect">Run</label>
+            <select id="runSelect"></select>
+          </div>
+          <div style="align-self:end;">
+            <button id="refreshButton" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="chips" id="runtimeChips"></div>
+      </div>
+    </section>
+
+    <section class="shell">
+      <aside class="panel">
+        <div class="panel-header">
+          <h2>Runs</h2>
+          <span class="section-subtitle" id="runCount">0</span>
+        </div>
+        <div class="panel-body">
+          <div class="run-list" id="runList"></div>
+        </div>
+      </aside>
+
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Run Detail</h2>
+            <span class="section-subtitle" id="runIdLabel">No run selected</span>
+          </div>
+          <div class="panel-body section">
+            <div class="summary-cards" id="summaryCards"></div>
+            <div class="grid">
+              <div class="section">
+                <div class="section-head">
+                  <h3 class="section-title">Tasks</h3>
+                  <span class="section-subtitle">State and available actions</span>
+                </div>
+                <div class="tasks" id="tasks"></div>
+              </div>
+              <div class="section">
+                <div class="section-head">
+                  <h3 class="section-title">Events</h3>
+                  <span class="section-subtitle">Recent decisions and warnings</span>
+                </div>
+                <div class="events" id="events"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div class="grid">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Recovery</h2>
+              <span class="section-subtitle">Blocking reason and restart hints</span>
+            </div>
+            <div class="panel-body section">
+              <div id="recovery"></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <h2>Dispatches</h2>
+              <span class="section-subtitle">Prepared, claimed, and invalidated handoffs</span>
+            </div>
+            <div class="panel-body section">
+              <div id="dispatches"></div>
+              <div class="claim-column" id="claimInspector"></div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      apiBase: document.querySelector("#app").dataset.apiBase || "/api",
+      runId: "",
+      runs: [],
+      detail: null,
+      recovery: null,
+      dispatches: [],
+      loading: false,
+      error: null,
+    };
+
+    const els = {
+      apiBase: document.querySelector("#apiBase"),
+      runSelect: document.querySelector("#runSelect"),
+      refreshButton: document.querySelector("#refreshButton"),
+      runList: document.querySelector("#runList"),
+      runCount: document.querySelector("#runCount"),
+      runIdLabel: document.querySelector("#runIdLabel"),
+      runtimeChips: document.querySelector("#runtimeChips"),
+      summaryCards: document.querySelector("#summaryCards"),
+      tasks: document.querySelector("#tasks"),
+      events: document.querySelector("#events"),
+      recovery: document.querySelector("#recovery"),
+      dispatches: document.querySelector("#dispatches"),
+      claimInspector: document.querySelector("#claimInspector"),
+    };
+
+    function fmt(value) {
+      if (!value) return "—";
+      return String(value);
+    }
+
+    function apiUrl(path) {
+      const base = (state.apiBase || "/api").replace(/\/$/, "");
+      return `${base}${path.startsWith("/") ? path : `/${path}`}`;
+    }
+
+    function badgeClass(status) {
+      return (status || "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+    }
+
+    async function fetchJson(path) {
+      const res = await fetch(apiUrl(path), { headers: { "accept": "application/json" } });
+      if (!res.ok) {
+        throw new Error(`${path} -> ${res.status}`);
+      }
+      return res.json();
+    }
+
+    async function refresh() {
+      state.loading = true;
+      state.error = null;
+      try {
+        const runs = await fetchJson("/runs");
+        state.runs = Array.isArray(runs) ? runs : [];
+        if (!state.runId && state.runs.length) {
+          state.runId = state.runs[0].id;
+        }
+        if (state.runId && !state.runs.some((run) => run.id === state.runId) && state.runs.length) {
+          state.runId = state.runs[0].id;
+        }
+        if (state.runId) {
+          const [detail, recovery, dispatches] = await Promise.all([
+            fetchJson(`/runs/${state.runId}`),
+            fetchJson(`/runs/${state.runId}/recovery`),
+            fetchJson(`/runs/${state.runId}/dispatches`),
+          ]);
+          state.detail = detail;
+          state.recovery = recovery;
+          state.dispatches = Array.isArray(dispatches) ? dispatches : [];
+        } else {
+          state.detail = null;
+          state.recovery = null;
+          state.dispatches = [];
+        }
+      } catch (error) {
+        state.error = error instanceof Error ? error.message : String(error);
+      } finally {
+        state.loading = false;
+        render();
+      }
+    }
+
+    function renderRuns() {
+      els.runCount.textContent = `${state.runs.length} run${state.runs.length === 1 ? "" : "s"}`;
+      els.runSelect.innerHTML = state.runs.map((run) => {
+        const selected = run.id === state.runId ? "selected" : "";
+        return `<option value="${run.id}" ${selected}>${run.id}</option>`;
+      }).join("");
+
+      if (!state.runs.length) {
+        els.runList.innerHTML = `<div class="empty">No runs yet. Create one through the API.</div>`;
+        return;
+      }
+
+      els.runList.innerHTML = state.runs.map((run) => {
+        const active = run.id === state.runId ? "is-active" : "";
+        return `
+          <button type="button" class="run-card ${active}" data-run-id="${run.id}">
+            <div class="run-meta">
+              <span>${run.status}</span>
+              <span class="mono">${run.created_at}</span>
+            </div>
+            <div class="run-intent">${run.intent}</div>
+            <div class="mono">${run.workspace_path}</div>
+          </button>
+        `;
+      }).join("");
+
+      els.runList.querySelectorAll("[data-run-id]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.runId = button.dataset.runId || "";
+          refresh();
+        });
+      });
+    }
+
+    function renderSummary() {
+      if (!state.detail) {
+        els.runIdLabel.textContent = "No run selected";
+        els.summaryCards.innerHTML = `<div class="empty">Select a run to inspect its state.</div>`;
+        els.tasks.innerHTML = "";
+        els.events.innerHTML = "";
+        els.recovery.innerHTML = "";
+        els.dispatches.innerHTML = "";
+        els.claimInspector.innerHTML = "";
+        els.runtimeChips.innerHTML = "";
+        return;
+      }
+
+      const run = state.detail;
+      els.runIdLabel.textContent = run.id;
+      els.summaryCards.innerHTML = [
+        ["Status", run.status],
+        ["Workspace", run.workspace_path],
+        ["Tasks", run.tasks.length],
+        ["Events", run.events.length],
+      ].map(([label, value]) => `
+        <div class="stat">
+          <span class="label">${label}</span>
+          <div class="value">${fmt(value)}</div>
+        </div>
+      `).join("");
+
+      els.runtimeChips.innerHTML = [
+        ["Recovery", state.recovery?.recovery_status],
+        ["Can Advance", state.recovery?.can_advance ? "yes" : "no"],
+        ["Latest Dispatch", state.recovery?.latest_dispatch?.status],
+      ].map(([label, value]) => `<span class="chip"><strong>${label}:</strong> ${fmt(value)}</span>`).join("");
+    }
+
+    function renderTasks() {
+      if (!state.detail) {
+        els.tasks.innerHTML = `<div class="empty">No run selected.</div>`;
+        return;
+      }
+      if (!state.detail.tasks.length) {
+        els.tasks.innerHTML = `<div class="empty">No tasks available.</div>`;
+        return;
+      }
+      els.tasks.innerHTML = state.detail.tasks.map((task) => `
+        <article class="task">
+          <div class="task-top">
+            <strong>${task.title}</strong>
+            <span class="badge ${badgeClass(task.status)}">${task.status}</span>
+          </div>
+          <div class="mono">${task.kind} • ${task.id}</div>
+          <div class="chips">
+            ${(task.available_actions || []).map((action) => `<span class="chip">${action}</span>`).join("")}
+          </div>
+          ${task.last_error ? `<p class="mono error" style="padding:0.65rem 0.75rem; border-radius:12px; margin:0.75rem 0 0;">${task.last_error}</p>` : ""}
+        </article>
+      `).join("");
+    }
+
+    function renderEvents() {
+      if (!state.detail) {
+        els.events.innerHTML = `<div class="empty">No events yet.</div>`;
+        return;
+      }
+      if (!state.detail.events.length) {
+        els.events.innerHTML = `<div class="empty">No events recorded.</div>`;
+        return;
+      }
+      els.events.innerHTML = state.detail.events.slice(-8).map((event) => `
+        <article class="event">
+          <div class="event-top">
+            <span class="badge ${badgeClass(event.level)}">${event.level}</span>
+            <span class="mono">${event.created_at}</span>
+          </div>
+          <div>${event.message}</div>
+        </article>
+      `).join("");
+    }
+
+    function renderRecovery() {
+      if (!state.recovery) {
+        els.recovery.innerHTML = `<div class="empty">Recovery snapshot unavailable.</div>`;
+        return;
+      }
+      const snapshot = state.recovery;
+      const hints = snapshot.restart_hints || [];
+      els.recovery.innerHTML = `
+        <div class="section">
+          <div class="claim-line"><span>recovery_status</span><span>${snapshot.recovery_status}</span></div>
+          <div class="claim-line"><span>can_advance</span><span>${snapshot.can_advance ? "true" : "false"}</span></div>
+          <div class="claim-line"><span>summary</span><span>${snapshot.summary}</span></div>
+          ${snapshot.blocking_reason ? `<div class="claim-line"><span>blocking_reason</span><span>${snapshot.blocking_reason}</span></div>` : ""}
+          ${snapshot.latest_dispatch ? `
+            <div class="claim-line"><span>latest_dispatch</span><span>${snapshot.latest_dispatch.id} • ${snapshot.latest_dispatch.status}</span></div>
+          ` : ""}
+          <div class="chips">
+            ${(snapshot.available_recovery_actions || []).map((action) => `
+              <span class="chip"><strong>${action.action}</strong> ${action.task_id || ""}</span>
+            `).join("") || '<span class="chip">No recovery actions available</span>'}
+          </div>
+          <div class="section">
+            <h3 class="section-title">Hints</h3>
+            <div class="events">
+              ${hints.length ? hints.map((hint) => `<div class="event">${hint}</div>`).join("") : '<div class="empty">No restart hints.</div>'}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderDispatches() {
+      if (!state.dispatches.length) {
+        els.dispatches.innerHTML = `<div class="empty">No dispatches prepared yet.</div>`;
+        els.claimInspector.innerHTML = "";
+        return;
+      }
+      els.dispatches.innerHTML = state.dispatches.map((dispatch) => `
+        <article class="dispatch">
+          <div class="dispatch-top">
+            <strong>${dispatch.task_title}</strong>
+            <span class="badge ${badgeClass(dispatch.status)}">${dispatch.status}</span>
+          </div>
+          <div class="mono">${dispatch.task_kind} • ${dispatch.agent_role}</div>
+          <div class="mono">${dispatch.worktree_name}</div>
+          <div class="chips">
+            <span class="chip"><strong>base</strong> ${dispatch.base_commit.slice(0, 10)}</span>
+            <span class="chip"><strong>prompt</strong> ${dispatch.id}</span>
+          </div>
+        </article>
+      `).join("");
+
+      const latest = state.dispatches[state.dispatches.length - 1];
+      els.claimInspector.innerHTML = latest ? `
+        <div class="section">
+          <h3 class="section-title">Latest Handoff</h3>
+          <div class="empty">
+            <div class="mono">${latest.prompt_path}</div>
+            <div style="margin-top:0.7rem;">${latest.status_detail || "No detail recorded."}</div>
+          </div>
+        </div>
+      ` : "";
+    }
+
+    function renderError() {
+      if (!state.error) return;
+      els.runtimeChips.innerHTML = `<span class="chip error"><strong>Error:</strong> ${state.error}</span>`;
+    }
+
+    function render() {
+      document.querySelector("#app").dataset.apiBase = state.apiBase;
+      els.apiBase.value = state.apiBase;
+      renderRuns();
+      renderSummary();
+      renderTasks();
+      renderEvents();
+      renderRecovery();
+      renderDispatches();
+      renderError();
+    }
+
+    els.apiBase.addEventListener("change", () => {
+      state.apiBase = els.apiBase.value.trim() || "/api";
+      refresh();
+    });
+
+    els.runSelect.addEventListener("change", () => {
+      state.runId = els.runSelect.value;
+      refresh();
+    });
+
+    els.refreshButton.addEventListener("click", refresh);
+
+    refresh();
+  </script>
+</body>
+</html>

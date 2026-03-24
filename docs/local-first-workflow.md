@@ -37,6 +37,12 @@ make test
 make smoke
 ```
 
+Opt in to the real worktree claim path only when you want to exercise live `git worktree` creation:
+
+```bash
+make claim-smoke
+```
+
 Expected first-slice behavior:
 
 - the service starts without Docker
@@ -45,8 +51,11 @@ Expected first-slice behavior:
 - each task exposes a small allowed action set
 - the next safe action can be previewed without mutating the run
 - the run exposes a recovery snapshot with blocking reasons and restart hints
+- the run exposes a searchable local memory surface for intent and artifacts
+- the local Embassy dashboard is reachable at `/embassy`
 - the run can materialize an idempotent pinned worktree-backed dispatch handoff for the current ready task
 - the run can claim that dispatch into a real pinned local worktree
+- the run can accept worker completion, failure, blocked, and heartbeat reports for a claimed dispatch
 - the planner can advance the run with a bounded workspace action
 - artifacts and logs stay local
 
@@ -59,8 +68,11 @@ curl -s -X POST http://127.0.0.1:8000/api/runs -H 'content-type: application/jso
 curl -s http://127.0.0.1:8000/api/runs
 curl -s http://127.0.0.1:8000/api/system/summary
 curl -s http://127.0.0.1:8000/api/runs/<run-id>/recovery
+curl -s "http://127.0.0.1:8000/api/runs/<run-id>/memory/search?q=dispatch"
 curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/dispatches
 curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/dispatches/<dispatch-id>/claim
+curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/dispatches/<dispatch-id>/heartbeat
+curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/dispatches/<dispatch-id>/complete -H 'content-type: application/json' -d '{"summary":"Completed safely"}'
 curl -s http://127.0.0.1:8000/api/runs/<run-id>/next-action
 curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/advance
 curl -s http://127.0.0.1:8000/api/runs/<run-id>/executions
@@ -77,6 +89,7 @@ If `next-action` or `advance` returns `409`, inspect these in order:
 - `artifacts/advance-decisions.jsonl` for append-only planner history
 - `artifacts/dispatches.jsonl` and `artifacts/dispatches/*.md` for dispatch handoff history, pinned commit metadata, and invalidation history
 - `artifacts/dispatch-claims/<dispatch-id>/stdout.txt` and `stderr.txt` for claim lifecycle logs
+- `artifacts/dispatch-results/<dispatch-id>.json` for claimed worker completion, failure, or blocked reports
 - `artifacts/recovery-actions.jsonl` for append-only recovery history
 - `artifacts/run-recovery.json` for the latest resumable snapshot
 - `executions/<id>/stdout.txt` and `executions/<id>/stderr.txt` if the latest execution failed
@@ -99,3 +112,15 @@ Use Git worktrees for isolated Codex threads.
 - Reviewer thread: spec and quality verification.
 
 Keep each worktree easy to clean up and easy to resume.
+
+## Claimed Worker Contract
+
+The current claimed worker transport is path-scoped:
+
+- identify the run and dispatch in the URL path, not the JSON body
+- refresh ownership with `POST /dispatches/{dispatch_id}/heartbeat`
+- report success with `POST /dispatches/{dispatch_id}/complete`
+- report failure with `POST /dispatches/{dispatch_id}/fail`
+- report a blocked worker state with `POST /dispatches/{dispatch_id}/block`
+
+See `docs/claimed-worker-contract.md` for the body schema and operator expectations.

@@ -8,8 +8,10 @@ The current real slice is a local-first native control plane. It can:
 - expose an action catalog and task-scoped available actions,
 - recommend the next safe action for the single ready task,
 - expose a resumable recovery snapshot for the current run state,
+- expose a local Embassy dashboard and searchable run memory,
 - prepare an idempotent worktree-backed dispatch handoff for the current ready task,
 - claim a prepared dispatch into a real pinned worktree lifecycle,
+- accept claimed-worker completion, failure, blocked, and heartbeat reports,
 - create an isolated workspace,
 - write artifacts,
 - persist run state/events in SQLite,
@@ -44,6 +46,12 @@ make smoke
 make test
 ```
 
+5. Optionally exercise the real worktree claim path:
+
+```bash
+make claim-smoke
+```
+
 ## Codex Worktree Flow
 
 Use hidden project-local worktrees so parallel threads stay isolated and bootstrapped the same way:
@@ -59,6 +67,7 @@ Every worktree shares the same workflow:
 - `make run` wraps `.codex/actions/run-api.sh` and starts the native FastAPI service.
 - `make test` wraps `.codex/actions/test.sh` and runs lint plus tests.
 - `make smoke` wraps `.codex/actions/smoke.sh` and verifies the live API.
+- `make claim-smoke` wraps `.codex/actions/claim-smoke.sh` and opt-ins to the real dispatch claim path.
 
 ## Repo Shape
 
@@ -79,7 +88,11 @@ Every worktree shares the same workflow:
 ## Current API Slice
 
 - `GET /api/runs/{run_id}/recovery` exposes the resumable run snapshot, current task focus, latest dispatch, latest decision, last execution, and restart hints.
+- `GET /embassy` serves the local Embassy dashboard and `GET /embassy/healthz` exposes its health check.
+- `GET /api/runs/{run_id}/memory/search?q=...` searches intent, artifacts, dispatch logs, and optional execution outputs inside the run workspace.
 - `GET /api/runs/{run_id}/dispatches`, `POST /api/runs/{run_id}/dispatches`, and `POST /api/runs/{run_id}/dispatches/{dispatch_id}/claim` expose, prepare, and claim pinned worktree handoff records for the current ready task.
+- `POST /api/runs/{run_id}/dispatches/{dispatch_id}/heartbeat` refreshes a claimed worker lease.
+- `POST /api/runs/{run_id}/dispatches/{dispatch_id}/complete`, `/fail`, and `/block` let a claimed worker hand results back into the run graph.
 - `POST /api/runs/{run_id}/recover` applies a small set of operator-driven recovery transitions without manual SQLite edits.
 - `GET /api/runs/{run_id}/next-action` previews the only safe next action without mutating run state.
 - `POST /api/runs/{run_id}/advance` records the planner decision and executes the bounded action.
@@ -87,6 +100,7 @@ Every worktree shares the same workflow:
 - Planner decisions are appended to `artifacts/advance-decisions.jsonl` inside the run workspace.
 - Dispatch handoffs are appended to `artifacts/dispatches.jsonl`, write task prompts under `artifacts/dispatches/`, and pin `repo_root` plus `base_commit`.
 - Claim attempts write stdout and stderr logs under `artifacts/dispatch-claims/<dispatch-id>/`.
+- Worker result manifests live under `artifacts/dispatch-results/<dispatch-id>.json`.
 - Repeated `POST /api/runs/{run_id}/dispatches` calls reuse the current prepared handoff for the same safe task instead of duplicating it.
 - Repeated `POST /api/runs/{run_id}/dispatches/{dispatch_id}/claim` calls reuse the current claimed handoff for the same dispatch instead of duplicating it.
 - Execution or recovery changes invalidate stale prepared dispatches before the run moves forward.
@@ -105,6 +119,7 @@ If `GET /api/runs/{run_id}/next-action` or `POST /api/runs/{run_id}/advance` ret
 - inspect `artifacts/advance-decisions.jsonl` for the latest planner decision record
 - inspect `artifacts/dispatches.jsonl` and `artifacts/dispatches/*.md` for the latest handoff prompt and any invalidated/superseded dispatch history
 - inspect `artifacts/dispatch-claims/<dispatch-id>/stdout.txt` and `stderr.txt` when a claim fails or when a claimed worktree needs verification
+- inspect `artifacts/dispatch-results/<dispatch-id>.json` when a claimed worker reports completion, failure, or a blocked state
 - inspect `artifacts/recovery-actions.jsonl` for the applied or blocked recovery history
 - inspect `executions/<id>/stdout.txt` and `executions/<id>/stderr.txt` when the latest execution failed
 
@@ -121,7 +136,7 @@ Stable diagnostic keys:
 
 ## Strongest Next Slice
 
-The next highest-leverage step is to connect claimed worktrees to real agent result reporting:
-- preserve auditable agent-level results alongside planner/recovery/dispatch artifacts,
-- let a claimed worker hand completion or failure back into the run graph,
+The next highest-leverage step is to connect claimed worktrees to richer agent execution loops:
+- preserve durable memory across runs instead of per-run search only,
+- attach heartbeats and result manifests to real Codex worker lifecycles automatically,
 - and expand the approved action graph without opening arbitrary shell access.
