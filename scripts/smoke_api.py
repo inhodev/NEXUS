@@ -38,6 +38,19 @@ def main() -> int:
         )
         assert status == 201
 
+        first_task = run["tasks"][0]["id"]
+        status, execution = request_json(
+            f"{args.base_url}/api/runs/{run['id']}/executions",
+            {"task_id": first_task, "action": "inspect-workspace"},
+        )
+        assert status == 201
+        assert execution["status"] == "completed"
+
+        status, refreshed_run = request_json(f"{args.base_url}/api/runs/{run['id']}")
+        assert status == 200
+        assert refreshed_run["tasks"][0]["status"] == "completed"
+        assert refreshed_run["tasks"][1]["status"] == "ready"
+
         status, summary = request_json(f"{args.base_url}/api/system/summary")
         assert status == 200
         assert summary["latest_run_id"] == run["id"]

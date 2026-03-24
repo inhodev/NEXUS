@@ -6,8 +6,24 @@ from fastapi import FastAPI, HTTPException
 
 from .config import Settings
 from .db import initialize_database
-from .models import CreateRunRequest, RunDetail, RunSummary, SystemSummary
-from .service import AGENT_ROLES, create_run, get_run, get_system_summary, list_runs
+from .models import (
+    CreateExecutionRequest,
+    CreateRunRequest,
+    ExecutionRecord,
+    RunDetail,
+    RunSummary,
+    SystemSummary,
+)
+from .service import (
+    AGENT_ROLES,
+    create_execution,
+    create_run,
+    get_execution,
+    get_run,
+    get_system_summary,
+    list_executions,
+    list_runs,
+)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -64,6 +80,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return get_run(app_settings, run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Run not found") from error
+
+    @app.post("/api/runs/{run_id}/executions", response_model=ExecutionRecord, status_code=201)
+    def create_execution_endpoint(
+        run_id: str,
+        request: CreateExecutionRequest,
+    ) -> ExecutionRecord:
+        try:
+            return create_execution(app_settings, run_id, request)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or task not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/api/runs/{run_id}/executions")
+    def list_executions_endpoint(run_id: str) -> dict[str, list[ExecutionRecord]]:
+        try:
+            return {"items": list_executions(app_settings, run_id)}
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run not found") from error
+
+    @app.get("/api/runs/{run_id}/executions/{execution_id}", response_model=ExecutionRecord)
+    def get_execution_endpoint(run_id: str, execution_id: str) -> ExecutionRecord:
+        try:
+            return get_execution(app_settings, run_id, execution_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or execution not found") from error
 
     return app
 

@@ -6,10 +6,16 @@ from pydantic import BaseModel, Field
 
 RunStatus = Literal["queued", "ready", "running", "failed", "completed"]
 TaskStatus = Literal["pending", "ready", "running", "blocked", "failed", "completed"]
+ExecutionStatus = Literal["running", "completed", "failed", "blocked"]
 
 
 class CreateRunRequest(BaseModel):
     intent: str = Field(min_length=1, max_length=10_000)
+
+
+class CreateExecutionRequest(BaseModel):
+    action: str = Field(min_length=1, max_length=128)
+    task_id: str | None = None
 
 
 class TaskRecord(BaseModel):
@@ -18,6 +24,9 @@ class TaskRecord(BaseModel):
     title: str
     status: TaskStatus
     position: int
+    started_at: str | None = None
+    finished_at: str | None = None
+    last_error: str | None = None
 
 
 class EventRecord(BaseModel):
@@ -25,6 +34,21 @@ class EventRecord(BaseModel):
     level: str
     message: str
     created_at: str
+
+
+class ExecutionRecord(BaseModel):
+    id: str
+    run_id: str
+    task_id: str | None
+    action: str
+    status: ExecutionStatus
+    command_argv: list[str]
+    cwd: str
+    started_at: str
+    finished_at: str
+    exit_code: int | None
+    stdout_path: str
+    stderr_path: str
 
 
 class RunSummary(BaseModel):

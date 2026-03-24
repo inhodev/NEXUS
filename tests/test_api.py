@@ -19,7 +19,7 @@ def test_health_endpoint(tmp_path: Path) -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_create_request_materializes_workspace_tasks_and_agents(tmp_path: Path) -> None:
+def test_create_request_materializes_workspace_and_tasks(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         agents_response = client.get("/api/agents")
         response = client.post("/api/requests", json={"intent": "Build a safe autonomous planner"})
@@ -58,3 +58,66 @@ def test_system_summary_tracks_runs(tmp_path: Path) -> None:
     payload = summary_response.json()
     assert payload["run_count"] == 1
     assert payload["latest_run_id"] == create_response.json()["id"]
+
+
+def test_execution_advances_task_and_records_outputs(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Inspect the workspace before planning"},
+        )
+        run = create_response.json()
+        first_task = run["tasks"][0]
+
+        execution_response = client.post(
+            f"/api/runs/{run['id']}/executions",
+            json={"task_id": first_task["id"], "action": "inspect-workspace"},
+        )
+        detail_response = client.get(f"/api/runs/{run['id']}")
+        executions_response = client.get(f"/api/runs/{run['id']}/executions")
+
+    assert execution_response.status_code == 201
+    execution = execution_response.json()
+    assert execution["status"] == "completed"
+    assert execution["exit_code"] == 0
+    assert (
+        run["workspace_path"] in execution["stdout_path"]
+        or execution["stdout_path"].endswith("stdout.txt")
+    )
+    assert Path(execution["stdout_path"]).exists()
+    assert Path(execution["stderr_path"]).exists()
+
+    detail = detail_response.json()
+    assert detail["status"] == "ready"
+    assert detail["tasks"][0]["status"] == "completed"
+    assert detail["tasks"][0]["started_at"] is not None
+    assert detail["tasks"][0]["finished_at"] is not None
+    assert detail["tasks"][1]["status"] == "ready"
+
+    executions = executions_response.json()["items"]
+    assert len(executions) == 1
+    assert executions[0]["action"] == "inspect-workspace"
+
+
+def test_blocked_execution_records_event_without_advancing_task(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Attempt a blocked action"},
+        )
+        run = create_response.json()
+        first_task = run["tasks"][0]
+
+        blocked_response = client.post(
+            f"/api/runs/{run['id']}/executions",
+            json={"task_id": first_task["id"], "action": "curl-the-internet"},
+        )
+        detail_response = client.get(f"/api/runs/{run['id']}")
+
+    assert blocked_response.status_code == 400
+    assert "not allowed" in blocked_response.json()["detail"]
+
+    detail = detail_response.json()
+    assert detail["tasks"][0]["status"] == "ready"
+    assert detail["tasks"][1]["status"] == "pending"
+    assert any("Blocked execution action" in event["message"] for event in detail["events"])

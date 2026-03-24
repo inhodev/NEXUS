@@ -7,7 +7,8 @@ The current real slice is a local-first native control plane. It can:
 - materialize a default task graph,
 - create an isolated workspace,
 - write artifacts,
-- and persist run state/events in SQLite.
+- persist run state/events in SQLite,
+- and execute a small mapped action set inside the run workspace to advance tasks with evidence.
 
 Docker is intentionally not part of the current developer workflow.
 
@@ -71,7 +72,7 @@ Every worktree shares the same workflow:
 
 ## Strongest Next Slice
 
-The next highest-leverage step is to add an explicit planner/executor loop on top of the current run model:
-- transition tasks between statuses,
-- append richer event logs,
-- and let the control plane execute bounded local commands inside run workspaces.
+The next highest-leverage step is to turn the bounded execution hook into a real planner/executor loop:
+- map each task kind to one or more approved server-side actions,
+- store richer execution summaries and restart hints,
+- and let the control plane progress a run across multiple tasks without opening arbitrary shell access.

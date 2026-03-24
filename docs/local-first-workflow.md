@@ -42,6 +42,7 @@ Expected first-slice behavior:
 - the service starts without Docker
 - a request can be registered
 - run and task state can be queried
+- a bounded execution action can run inside the workspace
 - artifacts and logs stay local
 
 Useful API checks:
@@ -51,6 +52,7 @@ curl -s http://127.0.0.1:8000/healthz
 curl -s -X POST http://127.0.0.1:8000/api/runs -H 'content-type: application/json' -d '{"intent":"Build a task manager with audit logs"}'
 curl -s http://127.0.0.1:8000/api/runs
 curl -s http://127.0.0.1:8000/api/system/summary
+curl -s http://127.0.0.1:8000/api/runs/<run-id>/executions
 ```
 
 ## Dependency Strategy

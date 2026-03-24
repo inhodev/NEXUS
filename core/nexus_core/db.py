@@ -23,7 +23,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     kind TEXT NOT NULL,
     title TEXT NOT NULL,
     status TEXT NOT NULL,
-    position INTEGER NOT NULL
+    position INTEGER NOT NULL,
+    started_at TEXT,
+    finished_at TEXT,
+    last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -33,6 +36,21 @@ CREATE TABLE IF NOT EXISTS events (
     message TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS executions (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    command_argv_json TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    exit_code INTEGER,
+    stdout_path TEXT NOT NULL,
+    stderr_path TEXT NOT NULL
+);
 """
 
 
@@ -40,6 +58,20 @@ def initialize_database(settings: Settings) -> None:
     settings.ensure_directories()
     with sqlite3.connect(settings.database_path) as connection:
         connection.executescript(SCHEMA)
+        _ensure_column(connection, "tasks", "started_at", "TEXT")
+        _ensure_column(connection, "tasks", "finished_at", "TEXT")
+        _ensure_column(connection, "tasks", "last_error", "TEXT")
+
+
+def _ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 @contextmanager
