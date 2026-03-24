@@ -10,6 +10,7 @@ from .models import (
     ActionDescriptor,
     CreateExecutionRequest,
     CreateRunRequest,
+    DispatchHandoffRecord,
     DispatchRecord,
     DispatchResultRequest,
     ExecutionRecord,
@@ -32,6 +33,8 @@ from .service import (
     create_execution,
     create_run,
     fail_dispatch,
+    get_dispatch,
+    get_dispatch_handoff,
     get_execution,
     get_recovery_snapshot,
     get_run,
@@ -121,6 +124,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return list_dispatches(app_settings, run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Run not found") from error
+
+    @app.get("/api/runs/{run_id}/dispatches/{dispatch_id}", response_model=DispatchRecord)
+    def dispatch_endpoint(run_id: str, dispatch_id: str) -> DispatchRecord:
+        try:
+            return get_dispatch(app_settings, run_id, dispatch_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or dispatch not found") from error
+
+    @app.get(
+        "/api/runs/{run_id}/dispatches/{dispatch_id}/handoff",
+        response_model=DispatchHandoffRecord,
+    )
+    def dispatch_handoff_endpoint(run_id: str, dispatch_id: str) -> DispatchHandoffRecord:
+        try:
+            return get_dispatch_handoff(app_settings, run_id, dispatch_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or dispatch not found") from error
 
     @app.post("/api/runs/{run_id}/dispatches", response_model=DispatchRecord, status_code=201)
     def create_dispatch_endpoint(run_id: str) -> DispatchRecord:

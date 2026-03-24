@@ -90,7 +90,7 @@ Every worktree shares the same workflow:
 - `GET /api/runs/{run_id}/recovery` exposes the resumable run snapshot, current task focus, latest dispatch, latest decision, last execution, and restart hints.
 - `GET /embassy` serves the local Embassy dashboard and `GET /embassy/healthz` exposes its health check.
 - `GET /api/runs/{run_id}/memory/search?q=...` searches intent, artifacts, dispatch logs, and optional execution outputs inside the run workspace.
-- `GET /api/runs/{run_id}/dispatches`, `POST /api/runs/{run_id}/dispatches`, and `POST /api/runs/{run_id}/dispatches/{dispatch_id}/claim` expose, prepare, and claim pinned worktree handoff records for the current ready task.
+- `GET /api/runs/{run_id}/dispatches`, `GET /api/runs/{run_id}/dispatches/{dispatch_id}`, `GET /api/runs/{run_id}/dispatches/{dispatch_id}/handoff`, `POST /api/runs/{run_id}/dispatches`, and `POST /api/runs/{run_id}/dispatches/{dispatch_id}/claim` expose, prepare, inspect, and claim pinned worktree handoff records for the current ready task.
 - `POST /api/runs/{run_id}/dispatches/{dispatch_id}/heartbeat` refreshes a claimed worker lease.
 - `POST /api/runs/{run_id}/dispatches/{dispatch_id}/complete`, `/fail`, and `/block` let a claimed worker hand results back into the run graph.
 - `POST /api/runs/{run_id}/recover` applies a small set of operator-driven recovery transitions without manual SQLite edits.
@@ -98,7 +98,7 @@ Every worktree shares the same workflow:
 - `POST /api/runs/{run_id}/advance` records the planner decision and executes the bounded action.
 - `POST /api/runs/{run_id}/executions` remains task-scoped and now requires an explicit `task_id`.
 - Planner decisions are appended to `artifacts/advance-decisions.jsonl` inside the run workspace.
-- Dispatch handoffs are appended to `artifacts/dispatches.jsonl`, write task prompts under `artifacts/dispatches/`, and pin `repo_root` plus `base_commit`.
+- Dispatch handoffs are appended to `artifacts/dispatches.jsonl`, write both human-readable prompts and machine-readable handoff JSON under `artifacts/dispatches/`, and pin `repo_root` plus `base_commit`.
 - Claim attempts write stdout and stderr logs under `artifacts/dispatch-claims/<dispatch-id>/`.
 - Worker result manifests live under `artifacts/dispatch-results/<dispatch-id>.json`.
 - Repeated `POST /api/runs/{run_id}/dispatches` calls reuse the current prepared handoff for the same safe task instead of duplicating it.

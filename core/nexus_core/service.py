@@ -15,8 +15,11 @@ from .models import (
     ActionDescriptor,
     CreateExecutionRequest,
     CreateRunRequest,
+    DispatchHandoffRecord,
     DispatchRecord,
+    DispatchReportUrls,
     DispatchResultRequest,
+    DispatchResultTemplate,
     EventRecord,
     ExecutionRecord,
     MemoryEntryRecord,
@@ -87,6 +90,7 @@ DISPATCHES_ARTIFACT_NAME = "dispatches.jsonl"
 DISPATCH_CLAIMS_DIR_NAME = "dispatch-claims"
 DISPATCH_RESULTS_DIR_NAME = "dispatch-results"
 DISPATCH_LEASE_SECONDS = 900
+DISPATCH_HEARTBEAT_INTERVAL_SECONDS = 300
 
 DEFAULT_AGENT_ROLE_BY_TASK_KIND: dict[str, str] = {
     "intake": "planner",
@@ -381,6 +385,28 @@ def list_dispatches(settings: Settings, run_id: str) -> list[DispatchRecord]:
             (run_id,),
         ).fetchall()
     return [_dispatch_from_row(row) for row in rows]
+
+
+def get_dispatch(settings: Settings, run_id: str, dispatch_id: str) -> DispatchRecord:
+    with connect(settings) as connection:
+        _fetch_run_row(connection, run_id)
+        return _fetch_dispatch_row(connection, run_id, dispatch_id)
+
+
+def get_dispatch_handoff(
+    settings: Settings,
+    run_id: str,
+    dispatch_id: str,
+) -> DispatchHandoffRecord:
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        dispatch = _fetch_dispatch_row(connection, run_id, dispatch_id)
+    workspace = Path(run_row["workspace_path"])
+    handoff = _dispatch_handoff_record(dispatch)
+    handoff_path = Path(dispatch.handoff_path)
+    if not handoff_path.exists():
+        _write_dispatch_handoff(workspace, dispatch)
+    return handoff
 
 
 def claim_dispatch(settings: Settings, run_id: str, dispatch_id: str) -> DispatchRecord:
@@ -1202,6 +1228,7 @@ def _append_dispatch_record(workspace: Path, dispatch: DispatchRecord) -> None:
     with artifact_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(dispatch.model_dump(mode="json")))
         handle.write("\n")
+    _write_dispatch_handoff(workspace, dispatch)
 
 
 def _persist_recovery_snapshot(settings: Settings, run_id: str) -> None:
@@ -1245,6 +1272,68 @@ def _recovery_artifact_paths(workspace: Path) -> RecoveryArtifactPaths:
     )
 
 
+def _dispatch_handoff_path(workspace: Path, dispatch_id: str) -> Path:
+    return workspace / "artifacts" / "dispatches" / f"{dispatch_id}.json"
+
+
+def _dispatch_report_urls(run_id: str, dispatch_id: str) -> DispatchReportUrls:
+    base = f"/api/runs/{run_id}/dispatches/{dispatch_id}"
+    return DispatchReportUrls(
+        heartbeat=f"{base}/heartbeat",
+        complete=f"{base}/complete",
+        fail=f"{base}/fail",
+        block=f"{base}/block",
+    )
+
+
+def _dispatch_result_template() -> DispatchResultTemplate:
+    return DispatchResultTemplate(
+        summary="Summarize the worker outcome and the next operator-relevant fact.",
+        changed_files=["/absolute/path/to/changed-file"],
+        commands_run=["make test"],
+        tests_run=["tests/test_api.py"],
+        artifacts=["/absolute/path/to/proof.txt"],
+        risk_notes=["Call out any unresolved risk or why no additional risk remains."],
+    )
+
+
+def _dispatch_operator_hints(dispatch: DispatchRecord) -> list[str]:
+    return [
+        (
+            f"Send a heartbeat to {dispatch.report_urls.heartbeat} every "
+            f"{dispatch.heartbeat_interval_seconds} seconds while the worktree is owned."
+        ),
+        (
+            f"Report success to {dispatch.report_urls.complete}, failure to "
+            f"{dispatch.report_urls.fail}, or a blocked state to {dispatch.report_urls.block}."
+        ),
+        (
+            f"Keep claim logs at {dispatch.claim_stdout_path or '[claim stdout pending]'} and "
+            f"{dispatch.claim_stderr_path or '[claim stderr pending]'} attached to the report "
+            "when they help explain the outcome."
+        ),
+    ]
+
+
+def _dispatch_handoff_record(dispatch: DispatchRecord) -> DispatchHandoffRecord:
+    return DispatchHandoffRecord(
+        dispatch=dispatch,
+        result_template=_dispatch_result_template(),
+        operator_hints=_dispatch_operator_hints(dispatch),
+    )
+
+
+def _write_dispatch_handoff(workspace: Path, dispatch: DispatchRecord) -> None:
+    handoff_path = Path(dispatch.handoff_path)
+    if not handoff_path.is_absolute():
+        handoff_path = _dispatch_handoff_path(workspace, dispatch.id)
+    handoff_path.parent.mkdir(parents=True, exist_ok=True)
+    handoff_path.write_text(
+        json.dumps(_dispatch_handoff_record(dispatch).model_dump(mode="json"), indent=2),
+        encoding="utf-8",
+    )
+
+
 def _build_dispatch_record(
     settings: Settings,
     run_row: sqlite3.Row,
@@ -1254,11 +1343,11 @@ def _build_dispatch_record(
     created_at: str,
 ) -> DispatchRecord:
     dispatch_id = f"dispatch_{uuid4().hex[:12]}"
+    workspace = Path(run_row["workspace_path"])
     worktree_name = _dispatch_worktree_name(run_row["id"], recommendation.task_kind)
     worktree_path = settings.worktree_root / worktree_name
-    prompt_path = Path(run_row["workspace_path"]) / "artifacts" / "dispatches" / (
-        f"{dispatch_id}.md"
-    )
+    prompt_path = workspace / "artifacts" / "dispatches" / f"{dispatch_id}.md"
+    handoff_path = _dispatch_handoff_path(workspace, dispatch_id)
     return DispatchRecord(
         id=dispatch_id,
         run_id=str(run_row["id"]),
@@ -1275,10 +1364,13 @@ def _build_dispatch_record(
         repo_root=str(settings.repo_root),
         base_commit=base_commit,
         prompt_path=str(prompt_path),
+        handoff_path=str(handoff_path),
         startup_commands=[
             f"make worktree NAME={worktree_name} BASE_REF={base_commit}",
             f"cd .worktrees/{worktree_name}",
         ],
+        heartbeat_interval_seconds=DISPATCH_HEARTBEAT_INTERVAL_SECONDS,
+        report_urls=_dispatch_report_urls(str(run_row["id"]), dispatch_id),
         claim_command_argv=[],
         claim_stdout_path=None,
         claim_stderr_path=None,
@@ -1327,10 +1419,21 @@ def _write_dispatch_prompt(
                 "## Startup",
                 *[f"- {command}" for command in dispatch.startup_commands],
                 "",
+                "## Report Back",
+                f"- Handoff JSON: {dispatch.handoff_path}",
+                (
+                    f"- Heartbeat every {dispatch.heartbeat_interval_seconds} seconds via "
+                    f"{dispatch.report_urls.heartbeat}"
+                ),
+                f"- Complete via {dispatch.report_urls.complete}",
+                f"- Fail via {dispatch.report_urls.fail}",
+                f"- Block via {dispatch.report_urls.block}",
+                "",
                 "## Context",
                 f"- Workspace: {workspace}",
                 f"- Repo Root: {dispatch.repo_root}",
                 f"- Prompt Path: {dispatch.prompt_path}",
+                f"- Handoff Path: {dispatch.handoff_path}",
                 f"- Worktree Path: {dispatch.worktree_path}",
                 "- Note: the worktree bootstraps from the pinned base commit above.",
                 "- Note: commit any required local changes before materializing the worktree.",
@@ -2430,6 +2533,9 @@ def _execution_from_row(row: sqlite3.Row) -> ExecutionRecord:
 def _dispatch_from_row(row: sqlite3.Row) -> DispatchRecord:
     payload = dict(row)
     base_commit = payload.get("base_commit") or "HEAD"
+    dispatch_id = str(payload["id"])
+    run_id = str(payload["run_id"])
+    workspace = Path(payload["prompt_path"]).parents[2]
     startup_commands_json = payload.pop("startup_commands_json", None)
     claim_command_argv_json = payload.pop("claim_command_argv_json", None)
     if startup_commands_json:
@@ -2443,6 +2549,9 @@ def _dispatch_from_row(row: sqlite3.Row) -> DispatchRecord:
         payload["claim_command_argv"] = json.loads(claim_command_argv_json)
     else:
         payload["claim_command_argv"] = []
+    payload["handoff_path"] = str(_dispatch_handoff_path(workspace, dispatch_id))
+    payload["heartbeat_interval_seconds"] = DISPATCH_HEARTBEAT_INTERVAL_SECONDS
+    payload["report_urls"] = _dispatch_report_urls(run_id, dispatch_id)
     payload["repo_root"] = payload.get("repo_root") or ""
     payload["base_commit"] = base_commit
     payload["updated_at"] = payload.get("updated_at") or payload["created_at"]

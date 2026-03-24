@@ -66,6 +66,14 @@ def main() -> int:
         assert status == 201
         assert dispatch["status"] == "prepared"
         assert len(dispatch["base_commit"]) == 40
+        assert dispatch["handoff_path"].endswith(".json")
+
+        status, handoff = request_json(
+            f"{args.base_url}/api/runs/{run['id']}/dispatches/{dispatch['id']}/handoff"
+        )
+        assert status == 200
+        assert handoff["dispatch"]["id"] == dispatch["id"]
+        assert handoff["dispatch"]["report_urls"]["heartbeat"].endswith("/heartbeat")
 
         status, claimed = request_json(
             f"{args.base_url}/api/runs/{run['id']}/dispatches/{dispatch['id']}/claim"

@@ -70,6 +70,7 @@ curl -s http://127.0.0.1:8000/api/system/summary
 curl -s http://127.0.0.1:8000/api/runs/<run-id>/recovery
 curl -s "http://127.0.0.1:8000/api/runs/<run-id>/memory/search?q=dispatch"
 curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/dispatches
+curl -s http://127.0.0.1:8000/api/runs/<run-id>/dispatches/<dispatch-id>/handoff
 curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/dispatches/<dispatch-id>/claim
 curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/dispatches/<dispatch-id>/heartbeat
 curl -s -X POST http://127.0.0.1:8000/api/runs/<run-id>/dispatches/<dispatch-id>/complete -H 'content-type: application/json' -d '{"summary":"Completed safely"}'
@@ -87,7 +88,7 @@ If `next-action` or `advance` returns `409`, inspect these in order:
 - `POST /api/runs/<run-id>/dispatches/<dispatch-id>/claim` to turn a prepared handoff into a real local worktree
 - `GET /api/runs/<run-id>` for task statuses and recent events
 - `artifacts/advance-decisions.jsonl` for append-only planner history
-- `artifacts/dispatches.jsonl` and `artifacts/dispatches/*.md` for dispatch handoff history, pinned commit metadata, and invalidation history
+- `artifacts/dispatches.jsonl`, `artifacts/dispatches/*.md`, and `artifacts/dispatches/*.json` for dispatch handoff history, pinned commit metadata, and machine-readable worker report contracts
 - `artifacts/dispatch-claims/<dispatch-id>/stdout.txt` and `stderr.txt` for claim lifecycle logs
 - `artifacts/dispatch-results/<dispatch-id>.json` for claimed worker completion, failure, or blocked reports
 - `artifacts/recovery-actions.jsonl` for append-only recovery history
@@ -118,6 +119,7 @@ Keep each worktree easy to clean up and easy to resume.
 The current claimed worker transport is path-scoped:
 
 - identify the run and dispatch in the URL path, not the JSON body
+- fetch `GET /dispatches/{dispatch_id}/handoff` when you need the latest machine-readable contract
 - refresh ownership with `POST /dispatches/{dispatch_id}/heartbeat`
 - report success with `POST /dispatches/{dispatch_id}/complete`
 - report failure with `POST /dispatches/{dispatch_id}/fail`

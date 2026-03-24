@@ -4,12 +4,14 @@ This document defines what a claimed worker must report back to NEXUS after it o
 
 The current API transport is path-scoped:
 
+- `GET /api/runs/{run_id}/dispatches/{dispatch_id}/handoff`
 - `POST /api/runs/{run_id}/dispatches/{dispatch_id}/heartbeat`
 - `POST /api/runs/{run_id}/dispatches/{dispatch_id}/complete`
 - `POST /api/runs/{run_id}/dispatches/{dispatch_id}/fail`
 - `POST /api/runs/{run_id}/dispatches/{dispatch_id}/block`
 
-That means `run_id` and `dispatch_id` come from the URL path. The body carries the worker result payload.
+That means `run_id` and `dispatch_id` come from the URL path. The body carries the worker
+result payload, and the handoff endpoint returns the latest machine-readable contract.
 
 ## Required Report Fields
 

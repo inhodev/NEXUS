@@ -49,6 +49,14 @@ def main() -> int:
         assert dispatch["task_kind"] == "intake"
         assert dispatch["agent_role"] == "planner"
         assert len(dispatch["base_commit"]) == 40
+        assert dispatch["handoff_path"].endswith(".json")
+
+        status, handoff = request_json(
+            f"{args.base_url}/api/runs/{run['id']}/dispatches/{dispatch['id']}/handoff"
+        )
+        assert status == 200
+        assert handoff["dispatch"]["id"] == dispatch["id"]
+        assert handoff["dispatch"]["report_urls"]["complete"].endswith("/complete")
 
         status, recovery = request_json(f"{args.base_url}/api/runs/{run['id']}/recovery")
         assert status == 200

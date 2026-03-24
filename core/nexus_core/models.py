@@ -136,6 +136,13 @@ class RecoveryArtifactPaths(BaseModel):
     recovery_snapshot: str
 
 
+class DispatchReportUrls(BaseModel):
+    heartbeat: str
+    complete: str
+    fail: str
+    block: str
+
+
 class DispatchRecord(BaseModel):
     id: str
     run_id: str
@@ -149,7 +156,10 @@ class DispatchRecord(BaseModel):
     repo_root: str
     base_commit: str
     prompt_path: str
+    handoff_path: str
     startup_commands: list[str] = Field(default_factory=list)
+    heartbeat_interval_seconds: int
+    report_urls: DispatchReportUrls
     claim_command_argv: list[str] = Field(default_factory=list)
     claim_stdout_path: str | None = None
     claim_stderr_path: str | None = None
@@ -176,6 +186,21 @@ class MemorySearchHitRecord(BaseModel):
     score: int
     snippet: str
     matched_terms: list[str] = Field(default_factory=list)
+
+
+class DispatchResultTemplate(BaseModel):
+    summary: str
+    changed_files: list[str] = Field(default_factory=list)
+    commands_run: list[str] = Field(default_factory=list)
+    tests_run: list[str] = Field(default_factory=list)
+    artifacts: list[str] = Field(default_factory=list)
+    risk_notes: list[str] = Field(default_factory=list)
+
+
+class DispatchHandoffRecord(BaseModel):
+    dispatch: DispatchRecord
+    result_template: DispatchResultTemplate
+    operator_hints: list[str] = Field(default_factory=list)
 
 
 class RecoverySnapshot(BaseModel):

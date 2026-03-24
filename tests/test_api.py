@@ -180,6 +180,18 @@ def test_dispatch_prepares_work_order_for_ready_task(tmp_path: Path) -> None:
         )
         run = create_response.json()
         dispatch_response = client.post(f"/api/runs/{run['id']}/dispatches")
+        dispatch_detail_response = None
+        dispatch_detail_response = client.get(
+            f"/api/runs/{run['id']}/dispatches/{run['id']}_missing"
+        )
+        assert dispatch_detail_response.status_code == 404
+        handoff_response = None
+        if dispatch_response.status_code == 201:
+            dispatch_id = dispatch_response.json()["id"]
+            dispatch_detail_response = client.get(
+                f"/api/runs/{run['id']}/dispatches/{dispatch_id}"
+            )
+            handoff_response = client.get(f"/api/runs/{run['id']}/dispatches/{dispatch_id}/handoff")
         dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
         recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
         detail_response = client.get(f"/api/runs/{run['id']}")
@@ -202,17 +214,35 @@ def test_dispatch_prepares_work_order_for_ready_task(tmp_path: Path) -> None:
     assert dispatch["startup_commands"][0] == (
         f"make worktree NAME={dispatch['worktree_name']} BASE_REF={dispatch['base_commit']}"
     )
+    assert dispatch["handoff_path"].endswith(f"{dispatch['id']}.json")
+    assert dispatch["heartbeat_interval_seconds"] == 300
+    assert dispatch["report_urls"]["heartbeat"].endswith(f"/dispatches/{dispatch['id']}/heartbeat")
+    assert dispatch["report_urls"]["complete"].endswith(f"/dispatches/{dispatch['id']}/complete")
     assert Path(dispatch["prompt_path"]).exists()
+    assert Path(dispatch["handoff_path"]).exists()
     assert Path(dispatch["prompt_path"]).name == f"{dispatch['id']}.md"
     assert "Record request and local constraints" in Path(dispatch["prompt_path"]).read_text(
         encoding="utf-8"
     )
     assert dispatch["base_commit"] in Path(dispatch["prompt_path"]).read_text(encoding="utf-8")
+    assert dispatch["handoff_path"] in Path(dispatch["prompt_path"]).read_text(encoding="utf-8")
+
+    assert handoff_response is not None
+    assert dispatch_detail_response is not None
+    assert dispatch_detail_response.status_code == 200
+    assert dispatch_detail_response.json()["id"] == dispatch["id"]
+    assert handoff_response.status_code == 200
+    handoff = handoff_response.json()
+    assert handoff["dispatch"]["id"] == dispatch["id"]
+    assert handoff["dispatch"]["handoff_path"] == dispatch["handoff_path"]
+    assert handoff["result_template"]["summary"]
+    assert any("/complete" in hint or "/fail" in hint for hint in handoff["operator_hints"])
 
     dispatches = dispatches_response.json()
     assert len(dispatches) == 1
     assert dispatches[0]["id"] == dispatch["id"]
     assert dispatches[0]["startup_commands"] == dispatch["startup_commands"]
+    assert dispatches[0]["handoff_path"] == dispatch["handoff_path"]
 
     recovery = recovery_response.json()
     assert recovery["latest_dispatch"]["id"] == dispatch["id"]
@@ -230,6 +260,7 @@ def test_dispatch_prepares_work_order_for_ready_task(tmp_path: Path) -> None:
     assert dispatch_artifact["agent_role"] == "planner"
     assert dispatch_artifact["base_commit"] == dispatch["base_commit"]
     assert dispatch_artifact["status"] == "prepared"
+    assert dispatch_artifact["handoff_path"] == dispatch["handoff_path"]
 
 
 def test_dispatch_reuses_existing_prepared_work_order(tmp_path: Path) -> None:
@@ -300,6 +331,7 @@ def test_claim_dispatch_materializes_worktree_and_logs(tmp_path: Path, monkeypat
             f"/api/runs/{run['id']}/executions",
             json={"task_id": dispatch["task_id"], "action": "inspect-workspace"},
         )
+        handoff_response = client.get(f"/api/runs/{run['id']}/dispatches/{dispatch['id']}/handoff")
         dispatches_response = client.get(f"/api/runs/{run['id']}/dispatches")
         recovery_response = client.get(f"/api/runs/{run['id']}/recovery")
 
@@ -317,6 +349,10 @@ def test_claim_dispatch_materializes_worktree_and_logs(tmp_path: Path, monkeypat
     assert Path(claimed["worktree_path"]).exists()
     assert Path(claimed["claim_stdout_path"]).read_text(encoding="utf-8") == "worktree ready\n"
     assert Path(claimed["claim_stderr_path"]).read_text(encoding="utf-8") == ""
+    assert handoff_response.status_code == 200
+    handoff = handoff_response.json()
+    assert handoff["dispatch"]["status"] == "claimed"
+    assert handoff["dispatch"]["claim_stdout_path"] == claimed["claim_stdout_path"]
 
     dispatches = dispatches_response.json()
     assert dispatches[0]["status"] == "claimed"
