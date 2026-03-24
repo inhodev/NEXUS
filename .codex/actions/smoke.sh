@@ -1,23 +1,29 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${0:A}")/../.." && pwd)"
 PORT="${NEXUS_API_PORT:-8000}"
-RUNTIME_ROOT="${NEXUS_RUNTIME_DIR:-$ROOT_DIR/.nexus}"
+BASE_URL="${NEXUS_API_BASE_URL:-http://127.0.0.1:$PORT}"
 VENV_BIN="$ROOT_DIR/.venv/bin"
 
 cd "$ROOT_DIR"
-mkdir -p "$RUNTIME_ROOT/logs"
+curl -sf "$BASE_URL/healthz" >/dev/null
+run_payload="$(curl -sf -X POST "$BASE_URL/api/runs" \
+  -H 'content-type: application/json' \
+  -d '{"intent":"Smoke test the NEXUS local-first control plane"}')"
+run_id="$(printf '%s' "$run_payload" | "$VENV_BIN/python" -c 'import json, sys; print(json.load(sys.stdin)["id"])')"
 
-"$VENV_BIN/uvicorn" nexus_core.app:app --host 127.0.0.1 --port "$PORT" >"$RUNTIME_ROOT/logs/smoke-api.log" 2>&1 &
-SERVER_PID=$!
-trap 'kill "$SERVER_PID" >/dev/null 2>&1 || true' EXIT
+printf '%s' "$run_payload" | grep -q '"id"'
 
-for _ in $(seq 1 20); do
-  if curl -s "http://127.0.0.1:$PORT/healthz" >/dev/null; then
-    break
+for _ in $(seq 1 10); do
+  summary_payload="$(curl -sf "$BASE_URL/api/system/summary")"
+  latest_run_id="$(printf '%s' "$summary_payload" | "$VENV_BIN/python" -c 'import json, sys; print(json.load(sys.stdin).get("latest_run_id") or "")')"
+  if [[ "$latest_run_id" == "$run_id" ]]; then
+    printf 'Smoke check passed for %s\n' "$BASE_URL"
+    exit 0
   fi
-  sleep 0.5
+  sleep 0.2
 done
 
-"$VENV_BIN/python" scripts/smoke_api.py --base-url "http://127.0.0.1:$PORT" "$@"
+printf 'Smoke check failed for %s: latest_run_id did not converge to %s\n' "$BASE_URL" "$run_id" >&2
+exit 1

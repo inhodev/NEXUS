@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -7,7 +7,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 BRANCH_NAME="$1"
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${0:A}")/../.." && pwd)"
 WORKTREE_DIR="$ROOT_DIR/.worktrees/$BRANCH_NAME"
 GIT_BRANCH="codex/$BRANCH_NAME"
 
@@ -19,6 +19,6 @@ if ! git check-ignore -q .worktrees; then
 fi
 
 git worktree add "$WORKTREE_DIR" -b "$GIT_BRANCH"
-bash "$WORKTREE_DIR/.codex/setup/bootstrap.sh"
+zsh "$WORKTREE_DIR/.codex/setup/bootstrap.sh"
 
 echo "Worktree ready at $WORKTREE_DIR ($GIT_BRANCH)"

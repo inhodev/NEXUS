@@ -15,20 +15,20 @@ help:
 		'  make worktree NAME=x Bootstrap .worktrees/x for Codex threads'
 
 setup:
-	@bash ./.codex/actions/setup.sh
+	@zsh ./.codex/actions/setup.sh
 
 run:
-	@bash ./.codex/actions/run-api.sh
+	@zsh ./.codex/actions/run-api.sh
 
 test:
-	@bash ./.codex/actions/test.sh
+	@zsh ./.codex/actions/test.sh
 
 smoke:
-	@bash ./.codex/actions/smoke.sh
+	@zsh ./.codex/actions/smoke.sh
 
 doctor:
-	@bash ./.codex/actions/doctor.sh
+	@zsh ./.codex/actions/doctor.sh
 
 worktree:
 	@test -n "$(NAME)" || (printf '%s\n' 'error: NAME is required, for example: make worktree NAME=agent-core' >&2; exit 1)
-	@bash ./.codex/setup/create-worktree.sh "$(NAME)"
+	@zsh ./.codex/setup/create-worktree.sh "$(NAME)"

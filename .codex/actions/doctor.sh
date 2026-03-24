@@ -1,11 +1,11 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${0:A}")/../.." && pwd)"
 
 cd "$ROOT_DIR"
 
-for cmd in git bash; do
+for cmd in git zsh; do
   command -v "$cmd" >/dev/null 2>&1 || {
     printf 'missing required command: %s\n' "$cmd" >&2
     exit 1
@@ -13,7 +13,7 @@ for cmd in git bash; do
 done
 
 printf 'git: available\n'
-printf 'bash: available\n'
+printf 'zsh: available\n'
 
 if command -v uv >/dev/null 2>&1; then
   printf 'uv: available\n'
