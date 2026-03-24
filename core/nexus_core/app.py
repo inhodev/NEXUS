@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException
 from .config import Settings
 from .db import initialize_database
 from .models import (
+    ActionDescriptor,
     CreateExecutionRequest,
     CreateRunRequest,
     ExecutionRecord,
@@ -21,6 +22,7 @@ from .service import (
     get_execution,
     get_run,
     get_system_summary,
+    list_action_descriptors,
     list_executions,
     list_runs,
 )
@@ -57,6 +59,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/agents")
     def agents() -> dict[str, list[dict[str, str]]]:
         return {"items": AGENT_ROLES}
+
+    @app.get("/api/actions")
+    def actions() -> dict[str, list[ActionDescriptor]]:
+        return {"items": list_action_descriptors()}
 
     @app.get("/api/system/summary", response_model=SystemSummary)
     def system_summary() -> SystemSummary:

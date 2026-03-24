@@ -5,6 +5,7 @@ NEXUS is a supervised autonomous software-civilization platform.
 The current real slice is a local-first native control plane. It can:
 - accept a run request,
 - materialize a default task graph,
+- expose an action catalog and task-scoped available actions,
 - create an isolated workspace,
 - write artifacts,
 - persist run state/events in SQLite,

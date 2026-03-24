@@ -24,6 +24,7 @@ class TaskRecord(BaseModel):
     title: str
     status: TaskStatus
     position: int
+    available_actions: list[str] = Field(default_factory=list)
     started_at: str | None = None
     finished_at: str | None = None
     last_error: str | None = None
@@ -49,6 +50,13 @@ class ExecutionRecord(BaseModel):
     exit_code: int | None
     stdout_path: str
     stderr_path: str
+
+
+class ActionDescriptor(BaseModel):
+    action: str
+    description: str
+    command_argv: list[str]
+    task_kinds: list[str]
 
 
 class RunSummary(BaseModel):

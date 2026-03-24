@@ -11,6 +11,7 @@ from uuid import uuid4
 from .config import Settings
 from .db import connect
 from .models import (
+    ActionDescriptor,
     CreateExecutionRequest,
     CreateRunRequest,
     EventRecord,
@@ -37,16 +38,46 @@ AGENT_ROLES = [
     {"role": "reviewer", "focus": "check quality, safety, and recoverability"},
 ]
 
-ACTION_MAP: dict[str, list[str]] = {
-    "inspect-workspace": ["pwd"],
-    "list-root": ["ls", "-la"],
-    "list-artifacts": ["ls", "-la", "artifacts"],
-    "read-intent": ["cat", "intent.md"],
+ACTION_CATALOG: dict[str, dict[str, object]] = {
+    "inspect-workspace": {
+        "argv": ["pwd"],
+        "description": "Confirm the active run workspace path.",
+        "task_kinds": {"intake"},
+    },
+    "list-root": {
+        "argv": ["ls", "-la"],
+        "description": "Inspect the root of the run workspace.",
+        "task_kinds": {"intake", "implementation", "verification"},
+    },
+    "list-artifacts": {
+        "argv": ["ls", "-la", "artifacts"],
+        "description": "Inspect generated artifacts for the run.",
+        "task_kinds": {"planning", "architecture", "verification"},
+    },
+    "read-intent": {
+        "argv": ["cat", "intent.md"],
+        "description": "Read the run intent captured at registration time.",
+        "task_kinds": {"intake", "planning", "architecture"},
+    },
 }
 
 
 def utc_now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def list_action_descriptors() -> list[ActionDescriptor]:
+    descriptors: list[ActionDescriptor] = []
+    for action, spec in ACTION_CATALOG.items():
+        descriptors.append(
+            ActionDescriptor(
+                action=action,
+                description=str(spec["description"]),
+                command_argv=list(spec["argv"]),
+                task_kinds=sorted(spec["task_kinds"]),
+            )
+        )
+    return descriptors
 
 
 def create_run(settings: Settings, request: CreateRunRequest) -> RunDetail:
@@ -150,7 +181,7 @@ def get_run(settings: Settings, run_id: str) -> RunDetail:
 
     return RunDetail(
         **dict(run_row),
-        tasks=[TaskRecord(**dict(row)) for row in task_rows],
+        tasks=[_task_from_row(row) for row in task_rows],
         events=[EventRecord(**dict(row)) for row in event_rows],
     )
 
@@ -171,17 +202,16 @@ def create_execution(
     request: CreateExecutionRequest,
 ) -> ExecutionRecord:
     start_time = utc_now()
-    command = ACTION_MAP.get(request.action)
+    action_spec = ACTION_CATALOG.get(request.action)
     with connect(settings) as connection:
         run_row = _fetch_run_row(connection, run_id)
         workspace = Path(run_row["workspace_path"])
         task_row = _fetch_task_row(connection, run_id, request.task_id) if request.task_id else None
 
-        if command is None:
-            _log_event(
+        if action_spec is None:
+            _block_execution_action(
                 connection,
                 run_id,
-                "warning",
                 f"Blocked execution action '{request.action}'.",
                 start_time,
             )
@@ -190,6 +220,22 @@ def create_execution(
 
         if task_row is not None and task_row["status"] not in {"ready", "running"}:
             raise ValueError("Task must be ready or running before execution")
+        if task_row is not None:
+            allowed_actions = _available_actions_for_kind(str(task_row["kind"]))
+            if request.action not in allowed_actions:
+                _block_execution_action(
+                    connection,
+                    run_id,
+                    (
+                        f"Blocked execution action '{request.action}' for task "
+                        f"'{task_row['title']}'."
+                    ),
+                    start_time,
+                )
+                connection.commit()
+                raise ValueError(
+                    f"Action '{request.action}' is not allowed for task kind '{task_row['kind']}'"
+                )
 
         execution_id = f"exec_{uuid4().hex[:12]}"
         cwd = str(workspace)
@@ -224,7 +270,7 @@ def create_execution(
             (run_id,),
         )
 
-    completed = _run_mapped_action(workspace, command)
+    completed = _run_mapped_action(workspace, list(action_spec["argv"]))
     stdout_path.write_text(completed.stdout, encoding="utf-8")
     stderr_path.write_text(completed.stderr, encoding="utf-8")
     finish_time = utc_now()
@@ -245,7 +291,7 @@ def create_execution(
                 request.task_id,
                 request.action,
                 execution_status,
-                json.dumps(command),
+                json.dumps(action_spec["argv"]),
                 cwd,
                 start_time,
                 finish_time,
@@ -419,6 +465,12 @@ def _fetch_task_row(
     return task_row
 
 
+def _task_from_row(row: sqlite3.Row) -> TaskRecord:
+    payload = dict(row)
+    payload["available_actions"] = _available_actions_for_kind(str(row["kind"]))
+    return TaskRecord(**payload)
+
+
 def _advance_next_task(
     connection: sqlite3.Connection,
     run_id: str,
@@ -497,6 +549,15 @@ def _log_event(
     )
 
 
+def _block_execution_action(
+    connection: sqlite3.Connection,
+    run_id: str,
+    message: str,
+    created_at: str,
+) -> None:
+    _log_event(connection, run_id, "warning", message, created_at)
+
+
 def _execution_from_row(row: sqlite3.Row) -> ExecutionRecord:
     payload = dict(row)
     payload["command_argv"] = json.loads(payload.pop("command_argv_json"))
@@ -508,3 +569,12 @@ def _last_error_message(stderr: str) -> str | None:
     if not stripped:
         return None
     return stripped.splitlines()[-1][:500]
+
+
+def _available_actions_for_kind(task_kind: str) -> list[str]:
+    actions = [
+        action
+        for action, spec in ACTION_CATALOG.items()
+        if task_kind in spec["task_kinds"]
+    ]
+    return sorted(actions)
