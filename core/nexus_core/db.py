@@ -81,6 +81,10 @@ def connect(settings: Settings) -> Iterator[sqlite3.Connection]:
     connection.execute("PRAGMA foreign_keys = ON;")
     try:
         yield connection
+    except Exception:
+        connection.rollback()
+        raise
+    else:
         connection.commit()
     finally:
         connection.close()

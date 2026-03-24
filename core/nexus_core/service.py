@@ -233,6 +233,7 @@ def advance_run(settings: Settings, run_id: str) -> ExecutionRecord:
                     "detail": warning,
                 },
             )
+            connection.commit()
             raise ValueError("No safe next action")
 
         _log_event(
@@ -273,7 +274,16 @@ def create_execution(
     with connect(settings) as connection:
         run_row = _fetch_run_row(connection, run_id)
         workspace = Path(run_row["workspace_path"])
-        task_row = _fetch_task_row(connection, run_id, request.task_id) if request.task_id else None
+        if not request.task_id:
+            _block_execution_action(
+                connection,
+                run_id,
+                f"Blocked execution action '{request.action}' without task scope.",
+                start_time,
+            )
+            connection.commit()
+            raise ValueError("task_id is required")
+        task_row = _fetch_task_row(connection, run_id, request.task_id)
 
         if action_spec is None:
             _block_execution_action(
@@ -285,24 +295,33 @@ def create_execution(
             connection.commit()
             raise ValueError(f"Action '{request.action}' is not allowed")
 
-        if task_row is not None and task_row["status"] not in {"ready", "running"}:
+        if task_row["status"] not in {"ready", "running"}:
+            _block_execution_action(
+                connection,
+                run_id,
+                (
+                    f"Blocked execution action '{request.action}' because task "
+                    f"'{task_row['title']}' is in status '{task_row['status']}'."
+                ),
+                start_time,
+            )
+            connection.commit()
             raise ValueError("Task must be ready or running before execution")
-        if task_row is not None:
-            allowed_actions = _available_actions_for_kind(str(task_row["kind"]))
-            if request.action not in allowed_actions:
-                _block_execution_action(
-                    connection,
-                    run_id,
-                    (
-                        f"Blocked execution action '{request.action}' for task "
-                        f"'{task_row['title']}'."
-                    ),
-                    start_time,
-                )
-                connection.commit()
-                raise ValueError(
-                    f"Action '{request.action}' is not allowed for task kind '{task_row['kind']}'"
-                )
+        allowed_actions = _available_actions_for_kind(str(task_row["kind"]))
+        if request.action not in allowed_actions:
+            _block_execution_action(
+                connection,
+                run_id,
+                (
+                    f"Blocked execution action '{request.action}' for task "
+                    f"'{task_row['title']}'."
+                ),
+                start_time,
+            )
+            connection.commit()
+            raise ValueError(
+                f"Action '{request.action}' is not allowed for task kind '{task_row['kind']}'"
+            )
 
         execution_id = f"exec_{uuid4().hex[:12]}"
         cwd = str(workspace)
@@ -310,24 +329,23 @@ def create_execution(
         stderr_path = workspace / "executions" / execution_id / "stderr.txt"
         stdout_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if task_row is not None:
-            connection.execute(
-                """
-                UPDATE tasks
-                SET status = 'running',
-                    started_at = COALESCE(started_at, ?),
-                    last_error = NULL
-                WHERE id = ? AND run_id = ?
-                """,
-                (start_time, task_row["id"], run_id),
-            )
-            _log_event(
-                connection,
-                run_id,
-                "info",
-                f"Task '{task_row['title']}' entered running state.",
-                start_time,
-            )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'running',
+                started_at = COALESCE(started_at, ?),
+                last_error = NULL
+            WHERE id = ? AND run_id = ?
+            """,
+            (start_time, task_row["id"], run_id),
+        )
+        _log_event(
+            connection,
+            run_id,
+            "info",
+            f"Task '{task_row['title']}' entered running state.",
+            start_time,
+        )
         connection.execute(
             """
             UPDATE runs
@@ -375,47 +393,46 @@ def create_execution(
             finish_time,
         )
 
-        if request.task_id is not None:
-            if completed.returncode == 0:
-                connection.execute(
-                    """
-                    UPDATE tasks
-                    SET status = 'completed',
-                        finished_at = ?,
-                        last_error = NULL
-                    WHERE id = ? AND run_id = ?
-                    """,
-                    (finish_time, request.task_id, run_id),
-                )
-                task_position = int(
-                    _fetch_task_row(connection, run_id, request.task_id)["position"]
-                )
-                _log_event(
-                    connection,
-                    run_id,
-                    "info",
-                    f"Task execution succeeded for '{request.action}'.",
-                    finish_time,
-                )
-                _advance_next_task(connection, run_id, task_position + 1, finish_time)
-            else:
-                connection.execute(
-                    """
-                    UPDATE tasks
-                    SET status = 'failed',
-                        finished_at = ?,
-                        last_error = ?
-                    WHERE id = ? AND run_id = ?
-                    """,
-                    (finish_time, _last_error_message(completed.stderr), request.task_id, run_id),
-                )
-                _log_event(
-                    connection,
-                    run_id,
-                    "warning",
-                    f"Task execution failed for '{request.action}'.",
-                    finish_time,
-                )
+        if completed.returncode == 0:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'completed',
+                    finished_at = ?,
+                    last_error = NULL
+                WHERE id = ? AND run_id = ?
+                """,
+                (finish_time, request.task_id, run_id),
+            )
+            task_position = int(
+                _fetch_task_row(connection, run_id, request.task_id)["position"]
+            )
+            _log_event(
+                connection,
+                run_id,
+                "info",
+                f"Task execution succeeded for '{request.action}'.",
+                finish_time,
+            )
+            _advance_next_task(connection, run_id, task_position + 1, finish_time)
+        else:
+            connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'failed',
+                    finished_at = ?,
+                    last_error = ?
+                WHERE id = ? AND run_id = ?
+                """,
+                (finish_time, _last_error_message(completed.stderr), request.task_id, run_id),
+            )
+            _log_event(
+                connection,
+                run_id,
+                "warning",
+                f"Task execution failed for '{request.action}'.",
+                finish_time,
+            )
         _update_run_status(connection, run_id)
 
     return get_execution(settings, run_id, execution_id)
@@ -522,10 +539,8 @@ def _fetch_run_row(connection: sqlite3.Connection, run_id: str) -> sqlite3.Row:
 def _fetch_task_row(
     connection: sqlite3.Connection,
     run_id: str,
-    task_id: str | None,
+    task_id: str,
 ) -> sqlite3.Row:
-    if task_id is None:
-        raise KeyError("task_id")
     task_row = connection.execute(
         """
         SELECT id, run_id, kind, title, status, position, started_at, finished_at, last_error

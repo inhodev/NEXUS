@@ -77,6 +77,7 @@ Every worktree shares the same workflow:
 
 - `GET /api/runs/{run_id}/next-action` previews the only safe next action without mutating run state.
 - `POST /api/runs/{run_id}/advance` records the planner decision and executes the bounded action.
+- `POST /api/runs/{run_id}/executions` remains task-scoped and now requires an explicit `task_id`.
 - Planner decisions are appended to `artifacts/advance-decisions.jsonl` inside the run workspace.
 
 ## Strongest Next Slice

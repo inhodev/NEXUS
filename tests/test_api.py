@@ -105,6 +105,33 @@ def test_execution_advances_task_and_records_outputs(tmp_path: Path) -> None:
     assert executions[0]["action"] == "inspect-workspace"
 
 
+def test_execution_requires_task_scope(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Reject unscoped execution requests"},
+        )
+        run = create_response.json()
+
+        execution_response = client.post(
+            f"/api/runs/{run['id']}/executions",
+            json={"action": "inspect-workspace"},
+        )
+        detail_response = client.get(f"/api/runs/{run['id']}")
+        executions_response = client.get(f"/api/runs/{run['id']}/executions")
+
+    assert execution_response.status_code == 400
+    assert execution_response.json()["detail"] == "task_id is required"
+    detail = detail_response.json()
+    assert detail["tasks"][0]["status"] == "ready"
+    assert any(
+        "Blocked execution action 'inspect-workspace' without task scope."
+        in event["message"]
+        for event in detail["events"]
+    )
+    assert executions_response.json()["items"] == []
+
+
 def test_next_action_endpoint_is_read_only(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         create_response = client.post(
@@ -205,6 +232,37 @@ def test_blocked_execution_records_event_without_advancing_task(tmp_path: Path) 
     assert any("Blocked execution action" in event["message"] for event in detail["events"])
 
 
+def test_completed_task_reexecution_is_rejected_and_logged(tmp_path: Path) -> None:
+    with make_client(tmp_path) as client:
+        create_response = client.post(
+            "/api/requests",
+            json={"intent": "Reject re-running completed task executions"},
+        )
+        run = create_response.json()
+        first_task = run["tasks"][0]
+
+        first_execution_response = client.post(
+            f"/api/runs/{run['id']}/executions",
+            json={"task_id": first_task["id"], "action": "inspect-workspace"},
+        )
+        blocked_response = client.post(
+            f"/api/runs/{run['id']}/executions",
+            json={"task_id": first_task["id"], "action": "inspect-workspace"},
+        )
+        detail_response = client.get(f"/api/runs/{run['id']}")
+
+    assert first_execution_response.status_code == 201
+    assert blocked_response.status_code == 400
+    assert blocked_response.json()["detail"] == "Task must be ready or running before execution"
+    detail = detail_response.json()
+    assert any(
+        "Blocked execution action 'inspect-workspace' because task" in event["message"]
+        for event in detail["events"]
+    )
+    assert detail["tasks"][0]["status"] == "completed"
+    assert detail["tasks"][1]["status"] == "ready"
+
+
 def test_task_scoped_action_rules_are_enforced(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
         create_response = client.post(
@@ -262,4 +320,8 @@ def test_ambiguous_next_action_state_fails_closed(tmp_path: Path) -> None:
     detail = detail_response.json()
     assert detail["tasks"][0]["status"] == "ready"
     assert detail["tasks"][1]["status"] == "ready"
+    assert any(
+        event["level"] == "warning" and "No safe next action for run" in event["message"]
+        for event in detail["events"]
+    )
     assert executions_response.json()["items"] == []
