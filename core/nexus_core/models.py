@@ -86,10 +86,33 @@ class RecoveryDecisionSummary(BaseModel):
     detail: str | None = None
 
 
+class RecoveryActionOption(BaseModel):
+    action: str
+    task_id: str | None = None
+    task_title: str | None = None
+    task_status: TaskStatus | None = None
+    description: str
+
+
+class RecoveryActionRequest(BaseModel):
+    action: str = Field(min_length=1, max_length=64)
+    task_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class RecoveryActionResult(BaseModel):
+    run_id: str
+    action: str
+    task_id: str | None = None
+    summary: str
+    updated_at: str
+    recovery: "RecoverySnapshot"
+
+
 class RecoveryArtifactPaths(BaseModel):
     intent: str
     initial_plan: str
     advance_log: str
+    recovery_actions: str
     recovery_snapshot: str
 
 
@@ -105,6 +128,7 @@ class RecoverySnapshot(BaseModel):
     next_action: NextActionRecord | None = None
     last_execution: ExecutionRecord | None = None
     latest_decision: RecoveryDecisionSummary | None = None
+    available_recovery_actions: list[RecoveryActionOption] = Field(default_factory=list)
     artifact_paths: RecoveryArtifactPaths
     updated_at: str
 

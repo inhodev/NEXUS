@@ -12,6 +12,8 @@ from .models import (
     CreateRunRequest,
     ExecutionRecord,
     NextActionRecord,
+    RecoveryActionRequest,
+    RecoveryActionResult,
     RecoverySnapshot,
     RunDetail,
     RunSummary,
@@ -30,6 +32,7 @@ from .service import (
     list_executions,
     list_runs,
     recommend_next_action,
+    recover_run,
 )
 
 
@@ -98,6 +101,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return get_recovery_snapshot(app_settings, run_id)
         except KeyError as error:
             raise HTTPException(status_code=404, detail="Run not found") from error
+
+    @app.post("/api/runs/{run_id}/recover", response_model=RecoveryActionResult)
+    def recover_endpoint(run_id: str, request: RecoveryActionRequest) -> RecoveryActionResult:
+        try:
+            return recover_run(app_settings, run_id, request)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="Run or task not found") from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/api/runs/{run_id}/next-action", response_model=NextActionRecord)
     def next_action_endpoint(run_id: str) -> NextActionRecord:

@@ -77,18 +77,23 @@ Every worktree shares the same workflow:
 ## Current API Slice
 
 - `GET /api/runs/{run_id}/recovery` exposes the resumable run snapshot, current task focus, latest decision, last execution, and restart hints.
+- `POST /api/runs/{run_id}/recover` applies a small set of operator-driven recovery transitions without manual SQLite edits.
 - `GET /api/runs/{run_id}/next-action` previews the only safe next action without mutating run state.
 - `POST /api/runs/{run_id}/advance` records the planner decision and executes the bounded action.
 - `POST /api/runs/{run_id}/executions` remains task-scoped and now requires an explicit `task_id`.
 - Planner decisions are appended to `artifacts/advance-decisions.jsonl` inside the run workspace.
+- Recovery transitions are appended to `artifacts/recovery-actions.jsonl`.
 - The latest resumable snapshot is stored in `artifacts/run-recovery.json`.
 
 ## When Advance Stops
 
 If `GET /api/runs/{run_id}/next-action` or `POST /api/runs/{run_id}/advance` returns `409`:
 - inspect `GET /api/runs/{run_id}/recovery` first for the blocking reason and restart hints
+- inspect `available_recovery_actions` in that snapshot for safe operator actions
+- call `POST /api/runs/{run_id}/recover` only with one of those advertised recovery actions
 - inspect `GET /api/runs/{run_id}` for task statuses and recent events
 - inspect `artifacts/advance-decisions.jsonl` for the latest planner decision record
+- inspect `artifacts/recovery-actions.jsonl` for the applied or blocked recovery history
 - inspect `executions/<id>/stdout.txt` and `executions/<id>/stderr.txt` when the latest execution failed
 
 Example `advance-decisions.jsonl` line:
@@ -104,7 +109,7 @@ Stable diagnostic keys:
 
 ## Strongest Next Slice
 
-The next highest-leverage step is to add explicit safe recovery transitions:
-- let operators repair a blocked or failed run without mutating SQLite by hand,
-- preserve auditable recovery decisions alongside planner/execution artifacts,
+The next highest-leverage step is to connect the control plane to real isolated work:
+- dispatch approved tasks into Codex worktrees or bounded worker flows,
+- preserve auditable agent-level results alongside planner/recovery artifacts,
 - and expand the approved action graph without opening arbitrary shell access.

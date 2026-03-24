@@ -17,6 +17,9 @@ from .models import (
     EventRecord,
     ExecutionRecord,
     NextActionRecord,
+    RecoveryActionOption,
+    RecoveryActionRequest,
+    RecoveryActionResult,
     RecoveryArtifactPaths,
     RecoveryDecisionSummary,
     RecoverySnapshot,
@@ -75,6 +78,7 @@ DEFAULT_ACTION_BY_TASK_KIND: dict[str, str] = {
 }
 
 RECOVERY_ARTIFACT_NAME = "run-recovery.json"
+RECOVERY_ACTIONS_ARTIFACT_NAME = "recovery-actions.jsonl"
 
 
 def utc_now() -> str:
@@ -225,6 +229,56 @@ def get_recovery_snapshot(settings: Settings, run_id: str) -> RecoverySnapshot:
     with connect(settings) as connection:
         run_row = _fetch_run_row(connection, run_id)
         return _build_recovery_snapshot(connection, run_row)
+
+
+def recover_run(
+    settings: Settings,
+    run_id: str,
+    request: RecoveryActionRequest,
+) -> RecoveryActionResult:
+    created_at = utc_now()
+    with connect(settings) as connection:
+        run_row = _fetch_run_row(connection, run_id)
+        workspace = Path(run_row["workspace_path"])
+        task_rows = _fetch_task_rows(connection, run_id)
+        available_actions = _available_recovery_actions(
+            task_rows,
+            run_status=str(run_row["status"]),
+        )
+        summary = _apply_recovery_action(
+            connection,
+            run_row,
+            task_rows,
+            available_actions,
+            request,
+            created_at,
+        )
+        _update_run_status(connection, run_id)
+        updated_run_row = _fetch_run_row(connection, run_id)
+        snapshot = _build_recovery_snapshot(connection, updated_run_row)
+        _append_recovery_action_record(
+            workspace,
+            {
+                "created_at": created_at,
+                "run_id": run_id,
+                "action": request.action,
+                "task_id": request.task_id,
+                "status": "applied",
+                "summary": summary,
+                "run_status": snapshot.run_status,
+                "can_advance": snapshot.can_advance,
+            },
+        )
+        _write_recovery_snapshot(workspace, snapshot)
+
+    return RecoveryActionResult(
+        run_id=run_id,
+        action=request.action,
+        task_id=request.task_id,
+        summary=summary,
+        updated_at=created_at,
+        recovery=snapshot,
+    )
 
 
 def advance_run(settings: Settings, run_id: str) -> ExecutionRecord:
@@ -545,6 +599,13 @@ def _append_advance_record(workspace: Path, payload: dict[str, object]) -> None:
         handle.write("\n")
 
 
+def _append_recovery_action_record(workspace: Path, payload: dict[str, object]) -> None:
+    artifact_path = workspace / "artifacts" / RECOVERY_ACTIONS_ARTIFACT_NAME
+    with artifact_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload))
+        handle.write("\n")
+
+
 def _persist_recovery_snapshot(settings: Settings, run_id: str) -> None:
     with connect(settings) as connection:
         run_row = _fetch_run_row(connection, run_id)
@@ -565,6 +626,7 @@ def _recovery_artifact_paths(workspace: Path) -> RecoveryArtifactPaths:
         intent=str(workspace / "intent.md"),
         initial_plan=str(workspace / "artifacts" / "initial-plan.json"),
         advance_log=str(workspace / "artifacts" / "advance-decisions.jsonl"),
+        recovery_actions=str(workspace / "artifacts" / RECOVERY_ACTIONS_ARTIFACT_NAME),
         recovery_snapshot=str(workspace / "artifacts" / RECOVERY_ARTIFACT_NAME),
     )
 
@@ -599,6 +661,18 @@ def _fetch_task_row(
     if task_row is None:
         raise KeyError(task_id)
     return task_row
+
+
+def _fetch_task_rows(connection: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT id, kind, title, status, position, started_at, finished_at, last_error
+        FROM tasks
+        WHERE run_id = ?
+        ORDER BY position ASC
+        """,
+        (run_id,),
+    ).fetchall()
 
 
 def _task_from_row(row: sqlite3.Row) -> TaskRecord:
@@ -675,6 +749,128 @@ def _resolve_next_action(
     )
 
 
+def _available_recovery_actions(
+    task_rows: list[sqlite3.Row],
+    *,
+    run_status: str,
+) -> list[RecoveryActionOption]:
+    statuses = [str(row["status"]) for row in task_rows]
+    ready_rows = [row for row in task_rows if row["status"] == "ready"]
+    actions: list[RecoveryActionOption] = []
+
+    if run_status not in {"running", "completed"} and "running" not in statuses:
+        for row in task_rows:
+            if row["status"] in {"failed", "blocked"}:
+                actions.append(
+                    RecoveryActionOption(
+                        action="requeue-task",
+                        task_id=str(row["id"]),
+                        task_title=str(row["title"]),
+                        task_status=str(row["status"]),
+                        description=(
+                            "Reset this failed or blocked task back to ready after repairing "
+                            "its inputs or artifacts."
+                        ),
+                    )
+                )
+
+        if len(ready_rows) > 1 and not any(
+            row["status"] in {"failed", "blocked"} for row in task_rows
+        ):
+            for row in ready_rows:
+                actions.append(
+                    RecoveryActionOption(
+                        action="select-ready-task",
+                        task_id=str(row["id"]),
+                        task_title=str(row["title"]),
+                        task_status=str(row["status"]),
+                        description=(
+                            "Keep this task ready and move all other ready tasks back to "
+                            "pending."
+                        ),
+                    )
+                )
+
+    return actions
+
+
+def _apply_recovery_action(
+    connection: sqlite3.Connection,
+    run_row: sqlite3.Row,
+    task_rows: list[sqlite3.Row],
+    available_actions: list[RecoveryActionOption],
+    request: RecoveryActionRequest,
+    created_at: str,
+) -> str:
+    run_id = str(run_row["id"])
+    workspace = Path(run_row["workspace_path"])
+    allowed_pairs = {(item.action, item.task_id) for item in available_actions}
+    pair = (request.action, request.task_id)
+    if pair not in allowed_pairs:
+        _log_event(
+            connection,
+            run_id,
+            "warning",
+            (
+                f"Blocked recovery action '{request.action}'"
+                + (f" for task '{request.task_id}'." if request.task_id else ".")
+            ),
+            created_at,
+        )
+        _append_recovery_action_record(
+            workspace,
+            {
+                "created_at": created_at,
+                "run_id": run_id,
+                "action": request.action,
+                "task_id": request.task_id,
+                "status": "blocked",
+                "detail": "Recovery action is not allowed for the current run state.",
+            },
+        )
+        _write_recovery_snapshot(workspace, _build_recovery_snapshot(connection, run_row))
+        connection.commit()
+        raise ValueError("Recovery action is not allowed for the current run state")
+
+    if request.task_id is None:
+        raise ValueError("task_id is required for recovery actions")
+
+    target_row = _fetch_task_row(connection, run_id, request.task_id)
+    if request.action == "requeue-task":
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'ready',
+                started_at = NULL,
+                finished_at = NULL,
+                last_error = NULL
+            WHERE id = ? AND run_id = ?
+            """,
+            (request.task_id, run_id),
+        )
+        summary = (
+            f"Recovery requeued task '{target_row['title']}' and restored it to ready state."
+        )
+    elif request.action == "select-ready-task":
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = CASE WHEN id = ? THEN 'ready' ELSE 'pending' END
+            WHERE run_id = ? AND status = 'ready'
+            """,
+            (request.task_id, run_id),
+        )
+        summary = (
+            f"Recovery kept task '{target_row['title']}' ready and normalized other "
+            "ready tasks back to pending."
+        )
+    else:
+        raise ValueError(f"Unknown recovery action '{request.action}'")
+
+    _log_event(connection, run_id, "decision", summary, created_at)
+    return summary
+
+
 def _build_recovery_snapshot(
     connection: sqlite3.Connection,
     run_row: sqlite3.Row,
@@ -682,19 +878,15 @@ def _build_recovery_snapshot(
     run_id = str(run_row["id"])
     run_status = str(run_row["status"])
     workspace = Path(run_row["workspace_path"])
-    task_rows = connection.execute(
-        """
-        SELECT id, kind, title, status, position, started_at, finished_at, last_error
-        FROM tasks
-        WHERE run_id = ?
-        ORDER BY position ASC
-        """,
-        (run_id,),
-    ).fetchall()
+    task_rows = _fetch_task_rows(connection, run_id)
     next_action, problem = _resolve_next_action(connection, run_row)
     current_task = _recovery_current_task(task_rows, next_action)
     last_execution = _fetch_latest_execution(connection, run_id)
     latest_decision = _read_latest_decision_summary(workspace)
+    available_recovery_actions = _available_recovery_actions(
+        task_rows,
+        run_status=run_status,
+    )
     recovery_status, summary, blocking_reason, restart_hints = _recovery_guidance(
         run_id=run_id,
         run_status=run_status,
@@ -717,6 +909,7 @@ def _build_recovery_snapshot(
         next_action=next_action,
         last_execution=last_execution,
         latest_decision=latest_decision,
+        available_recovery_actions=available_recovery_actions,
         artifact_paths=_recovery_artifact_paths(workspace),
         updated_at=utc_now(),
     )

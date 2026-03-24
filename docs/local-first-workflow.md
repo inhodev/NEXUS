@@ -65,8 +65,11 @@ curl -s http://127.0.0.1:8000/api/runs/<run-id>/executions
 If `next-action` or `advance` returns `409`, inspect these in order:
 
 - `GET /api/runs/<run-id>/recovery` for the latest blocking reason and restart hints
+- `available_recovery_actions` in that snapshot for the safe recovery transitions currently allowed
+- `POST /api/runs/<run-id>/recover` to apply one advertised recovery action
 - `GET /api/runs/<run-id>` for task statuses and recent events
 - `artifacts/advance-decisions.jsonl` for append-only planner history
+- `artifacts/recovery-actions.jsonl` for append-only recovery history
 - `artifacts/run-recovery.json` for the latest resumable snapshot
 - `executions/<id>/stdout.txt` and `executions/<id>/stderr.txt` if the latest execution failed
 
